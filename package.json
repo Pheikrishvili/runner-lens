@@ -4,11 +4,9 @@
   "private": true,
   "description": "Zero-config observability for GitHub Actions runners",
   "scripts": {
-    "build": "npm run bundle:main && npm run bundle:post",
-    "bundle:main": "esbuild src/main.ts --bundle --platform=node --target=node24 --outfile=dist/main/index.js --minify --sourcemap",
-    "bundle:post": "esbuild src/post.ts --bundle --platform=node --target=node24 --outfile=dist/post/index.js --minify --sourcemap",
-    "typecheck": "tsc --noEmit",
-    "test": "jest --coverage",
+    "build": "node scripts/bundle.js",
+    "typecheck": "node ./node_modules/typescript/bin/tsc --noEmit",
+    "test": "node ./node_modules/jest/bin/jest.js --coverage",
     "prepare": "npm run build"
   },
   "dependencies": {

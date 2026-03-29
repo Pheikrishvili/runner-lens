@@ -2,7 +2,7 @@
 
 **Zero-config observability for GitHub Actions runners.**
 
-Drop RunnerLens into any workflow and get CPU and memory metrics with sparkline charts directly in your Job Summary — no infrastructure required.
+Drop RunnerLens into any workflow and get CPU and memory metrics with charts in your Job Summary — no infrastructure required.
 
 ## Quick Start
 
@@ -16,33 +16,24 @@ jobs:
       - run: npm ci && npm test
 ```
 
-That's it. When the job finishes, you'll see a resource report in the **Job Summary** tab.
+That's it. When the job finishes, you'll see a resource report in the **Job Summary** tab. The post step runs with `post-if: always()`, so the report still runs if earlier steps fail. For per-step breakdown in the summary, add `permissions: actions: read` on the job (and keep the default `github-token`).
 
 ## What You Get
 
-- **CPU** — average, peak, p95, p99 with sparkline timeline
-- **Memory** — usage, swap detection, pressure alerts
-- **Per-Step Breakdown** — CPU/memory usage and duration for each workflow step
-- **Collector Overhead** — RunnerLens' own CPU/memory footprint
-- **Alerts** — threshold-based warnings for CPU, memory, swap, I/O wait, CPU steal
-- **Recommendations** — right-sizing advice (oversized runner, CPU saturation)
-- **Top Processes** — peak CPU consumers across the job
+- **CPU and memory** — averages, min/max, and timeline charts in the Summary (via [QuickChart.io](https://quickchart.io))
+- **Load averages** in the aggregated report
+- **Per-step correlation** — when the token can read workflow steps (`actions: read`)
+- **Collector overhead** — RunnerLens’ own CPU/memory footprint in samples
+- **Optional artifact** — full `report.json` when `upload-artifact` is `true` (default)
 
 ## Inputs
 
 | Input | Default | Description |
 |---|---|---|
-| `api-key` | `''` | RunnerLens SaaS API key (optional) |
-| `api-endpoint` | `https://api.runnerlens.com` | API endpoint override |
-| `sample-interval` | `3` | Seconds between samples (1–30) |
-| `include-processes` | `true` | Capture top processes |
-| `github-token` | `''` | GitHub token for per-step metrics (optional) |
-| `summary-style` | `full` | Report detail: `full` \| `compact` \| `minimal` \| `none` |
+| `sample-interval` | `5` | Seconds between samples (1–60) |
+| `github-token` | `${{ github.token }}` | Token for per-step metrics |
 | `max-file-size` | `100` | Max metrics file size in MB before rotation (0 = unlimited) |
-| `threshold-cpu-warn` | `80` | CPU % warning threshold |
-| `threshold-cpu-crit` | `95` | CPU % critical threshold |
-| `threshold-mem-warn` | `80` | Memory % warning threshold |
-| `threshold-mem-crit` | `95` | Memory % critical threshold |
+| `upload-artifact` | `true` | Upload report as a workflow artifact |
 
 ## Outputs
 
@@ -50,44 +41,52 @@ That's it. When the job finishes, you'll see a resource report in the **Job Summ
 |---|---|---|
 | `cpu-avg` | `34.2` | Average CPU usage % |
 | `cpu-max` | `87.1` | Peak CPU usage % |
-| `cpu-p95` | `72.5` | 95th percentile CPU % |
 | `mem-avg-mb` | `2048` | Average memory usage (MB) |
 | `mem-max-mb` | `3584` | Peak memory usage (MB) |
 | `mem-avg-pct` | `56.3` | Average memory usage % |
 | `samples` | `120` | Number of samples collected |
 | `duration-seconds` | `360` | Monitoring wall-clock duration |
-| `report-json` | `{...}` | Full report as JSON |
+| `report-json` | `{...}` | Report JSON (timeline arrays omitted for size; full report is in the artifact when upload is on) |
 
 ### Using Outputs
 
+RunnerLens sets outputs in its **post** step (after your other steps finish), so you cannot read `steps.<id>.outputs.*` from another step in the **same** job. Expose them as **job outputs**, then consume them from a **downstream job** with `needs`:
+
 ```yaml
-- uses: runnerlens/runner-lens@v1
-  id: lens
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      cpu_avg: ${{ steps.lens.outputs['cpu-avg'] }}
+      samples: ${{ steps.lens.outputs.samples }}
+    steps:
+      - uses: runnerlens/runner-lens@v1
+        id: lens
+      - run: npm ci && npm test
 
-- run: npm ci && npm test
-
-- name: Fail if CPU was critically high
-  if: always()
-  run: |
-    cpu_p95="${{ steps.lens.outputs.cpu-p95 }}"
-    if (( $(echo "$cpu_p95 > 95" | bc -l) )); then
-      echo "::error::CPU p95 was ${cpu_p95}%"
-      exit 1
-    fi
+  after:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "CPU avg: ${{ needs.build.outputs.cpu_avg }}"
+          echo "Samples: ${{ needs.build.outputs.samples }}"
 ```
+
+Use bracket form for hyphenated step output names, e.g. `steps.lens.outputs['cpu-avg']`.
 
 ## Architecture
 
 RunnerLens uses a two-phase design:
 
 1. **Main step** — spawns a lightweight bash collector as a detached background process
-2. **Post step** (`post-if: always()`) — stops the collector, aggregates data, writes the Job Summary
+2. **Post step** (`post-if: always()`) — stops the collector, aggregates data, writes the Job Summary, sets outputs, optional artifact
 
-The bash collector reads directly from `/proc` (CPU, memory) with <0.5% CPU overhead. It outputs one JSON line per sample to a temp file.
+The bash collector reads from `/proc` or cgroup metrics on Linux. It outputs one JSON line per sample to a temp file.
 
 ### File Rotation
 
-For long-running jobs (multi-hour builds on self-hosted runners), the collector automatically rotates the metrics file when it exceeds `max-file-size` MB. The TypeScript post-processor reads both the rotated and current files, sorts samples chronologically, and produces a single unified report.
+For long-running jobs, the collector rotates the metrics file when it exceeds `max-file-size` MB. The post step reads rotated and current files, sorts samples chronologically, and produces a single report.
 
 ## How It Works
 
@@ -104,22 +103,7 @@ For long-running jobs (multi-hour builds on self-hosted runners), the collector 
                            │
               ┌────────────┼────────────┐
               ▼            ▼            ▼
-        Job Summary    Outputs    API (optional)
-```
-
-## SaaS Dashboard (Coming Soon)
-
-Add an `api-key` to unlock:
-
-- **Historical trends** across runs
-- **Cross-workflow comparisons**
-- **Team-wide cost analytics**
-- **Slack/email alerting**
-
-```yaml
-- uses: runnerlens/runner-lens@v1
-  with:
-    api-key: ${{ secrets.RUNNERLENS_API_KEY }}
+        Job Summary    Outputs    Artifact (optional)
 ```
 
 ## Development
@@ -128,30 +112,32 @@ Add an `api-key` to unlock:
 npm ci
 npm run typecheck    # TypeScript strict mode
 npm test             # Jest with coverage
-npm run build        # esbuild → dist/
+npm run build        # node scripts/bundle.js → dist/ (esbuild JS API; PATH-safe)
 ```
 
 ### Project Structure
 
 ```
-├── action.yml                 # GitHub Action definition
-├── scripts/collect.sh         # Bash /proc collector (v2)
+├── action.yml
+├── scripts/
+│   ├── collect.sh           # Bash metrics collector
+│   └── bundle.js            # esbuild → dist/main + dist/post
 ├── src/
-│   ├── main.ts                # Entry: spawn collector
-│   ├── post.ts                # Post: stop, aggregate, report
-│   ├── config.ts              # Input parsing & validation
-│   ├── constants.ts           # Shared paths & state keys
-│   ├── types.ts               # All TypeScript interfaces
-│   ├── system-info.ts         # Static runner metadata
-│   ├── stats.ts               # Percentile, avg, min/max (stack-safe)
-│   ├── charts.ts              # ASCII sparklines & formatting
-│   ├── alerts.ts              # Threshold evaluation
-│   ├── recommendations.ts     # Right-sizing engine
-│   ├── reporter.ts            # Aggregation + markdown generation
-│   └── api-client.ts          # SaaS upload (gzip, retries)
-├── dist/                      # Bundled JS (checked in)
-├── __tests__/                 # Jest test suite
-└── .github/workflows/ci.yml   # CI with dogfooding
+│   ├── main.ts                # Entry: spawn collect.sh, write state
+│   ├── post.ts                # Post: stop collector, outputs, artifact, summary
+│   ├── collector.ts           # SIGTERM collector and wait for flush
+│   ├── config.ts              # Parse and validate action inputs
+│   ├── constants.ts           # Data paths and state keys
+│   ├── job-summary.ts         # Job Summary markdown and charts
+│   ├── metrics-jsonl.ts       # Stream / merge rotated JSONL samples
+│   ├── quickchart-client.ts   # QuickChart.io chart URLs
+│   ├── reporter.ts            # Aggregate samples into report object
+│   ├── stats.ts               # Averages, min/max, safe percentages
+│   ├── steps.ts               # GitHub API: fetch and correlate steps
+│   └── types.ts               # Shared TypeScript types
+├── dist/                    # Bundled JS (checked in)
+├── __tests__/
+└── .github/workflows/ci.yml
 ```
 
 ## License

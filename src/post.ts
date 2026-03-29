@@ -3,83 +3,22 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { DefaultArtifactClient } from '@actions/artifact';
-import type { MetricSample, SystemInfo, StepMetrics } from './types';
+import type { SystemInfo, StepMetrics } from './types';
+import { stopCollectorAndFlush } from './collector';
 import { parseConfig } from './config';
+import { loadSamples } from './metrics-jsonl';
 import { processMetrics } from './reporter';
 import { safePct } from './stats';
 import { fetchSteps, correlateSteps, type FetchStepsResult } from './steps';
 
 import { buildJobSummary } from './job-summary';
 import {
-  DATA_DIR, METRICS_FILE, PID_FILE, SYSINFO_FILE, START_TS_FILE, STATE,
+  DATA_DIR, SYSINFO_FILE, START_TS_FILE, STATE,
 } from './constants';
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────
-
-function stopCollector(): void {
-  try {
-    if (!fs.existsSync(PID_FILE)) return;
-    const pid = parseInt(fs.readFileSync(PID_FILE, 'utf-8').trim(), 10);
-    if (pid > 0) {
-      // Kill the entire process group (collector + child awk/ps/df).
-      // The collector is spawned with { detached: true } so it's a
-      // process group leader and -pid targets the whole group.
-      try { process.kill(-pid, 'SIGTERM'); } catch {
-        // If group kill fails (e.g. not a group leader), fall back to
-        // killing just the parent process.
-        try { process.kill(pid, 'SIGTERM'); } catch { /* already exited */ }
-      }
-      core.info(`RunnerLens: collector stopped (PID ${pid})`);
-    }
-  } catch (e) {
-    core.debug(`RunnerLens: stop error — ${e}`);
-  }
-}
-
-/**
- * Load JSONL samples from the metrics file AND the rotated .1 file.
- *
- * The v2 collector rotates metrics.jsonl → metrics.jsonl.1 when it
- * exceeds --max-size. We read .1 first (older data) then the main
- * file (newer data) so samples are in chronological order.
- */
-function loadSamples(): MetricSample[] {
-  const files = [`${METRICS_FILE}.1`, METRICS_FILE].filter((f) =>
-    fs.existsSync(f),
-  );
-
-  const samples: MetricSample[] = [];
-  for (const file of files) {
-    const content = fs.readFileSync(file, 'utf-8');
-    let start = 0;
-    while (start < content.length) {
-      let end = content.indexOf('\n', start);
-      if (end === -1) end = content.length;
-      const line = content.substring(start, end).trim();
-      start = end + 1;
-      if (!line) continue;
-      try {
-        const parsed = JSON.parse(line);
-        // Basic shape validation: must have timestamp and cpu.usage
-        if (
-          typeof parsed.timestamp === 'number' &&
-          parsed.cpu && typeof parsed.cpu.usage === 'number' &&
-          parsed.memory && typeof parsed.memory.used_mb === 'number'
-        ) {
-          samples.push(parsed as MetricSample);
-        }
-      } catch {
-        /* skip malformed lines */
-      }
-    }
-  }
-
-  // Ensure chronological order (rotation could cause minor overlap)
-  samples.sort((a, b) => a.timestamp - b.timestamp);
-  return samples;
-}
 
 function loadSystemInfo(): SystemInfo {
   try {
@@ -112,14 +51,10 @@ async function run(): Promise<void> {
     const config  = parseConfig();
 
     // ── Stop collector & flush ────────────────────────────
-    stopCollector();
-    // Wait for the collector to handle SIGTERM, flush its last sample,
-    // and close the output file. 1200ms covers the worst case: one
-    // in-flight sample (~50ms) plus kernel signal delivery jitter.
-    await new Promise((r) => setTimeout(r, 1200));
+    await stopCollectorAndFlush();
 
     // ── Load data ─────────────────────────────────────────
-    const samples = loadSamples();
+    const samples = await loadSamples();
     const sysInfo = loadSystemInfo();
 
     if (samples.length === 0) {
@@ -186,7 +121,7 @@ async function run(): Promise<void> {
         await artClient.uploadArtifact(artifactName, [reportFile], DATA_DIR);
         core.info(`RunnerLens: uploaded artifact "${artifactName}"`);
       } catch (e) {
-        core.debug(`RunnerLens: artifact upload failed — ${e}`);
+        core.warning(`RunnerLens: artifact upload failed — ${e}`);
       }
     }
 

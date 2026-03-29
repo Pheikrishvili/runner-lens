@@ -1,6 +1,6 @@
 import * as core from '@actions/core';
 import * as https from 'https';
-import type { IncomingMessage } from 'http';
+import type { ClientRequest, IncomingMessage } from 'http';
 import type { MetricSample, StepMetrics } from './types';
 import { safeMax } from './stats';
 
@@ -43,45 +43,58 @@ function httpGet(
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
 
-    // Hard cap on total request time (connection + body transfer)
+    let req: ClientRequest | undefined;
     const totalTimer = setTimeout(() => {
-      req.destroy();
+      try {
+        req?.destroy();
+      } catch {
+        /* ignore */
+      }
       reject(new Error(`total timeout after ${TOTAL_TIMEOUT_MS}ms`));
     }, TOTAL_TIMEOUT_MS);
 
-    const cleanup = (): void => { clearTimeout(totalTimer); };
+    const cleanup = (): void => {
+      clearTimeout(totalTimer);
+    };
 
-    const req = https.request(
-      {
-        hostname: parsed.hostname,
-        port: parsed.port || 443,
-        path: parsed.pathname + parsed.search,
-        method: 'GET',
-        headers: { ...headers, 'User-Agent': 'RunnerLens' },
-        timeout: 10_000,
-      },
-      (res: IncomingMessage) => {
-        // Follow redirects (301, 302, 307, 308)
-        const status = res.statusCode ?? 0;
-        if ([301, 302, 307, 308].includes(status) && res.headers.location) {
-          cleanup();
-          res.resume(); // drain the response
-          if (redirectsLeft <= 0) {
-            reject(new Error('too many redirects'));
+    try {
+      req = https.request(
+        {
+          hostname: parsed.hostname,
+          port: parsed.port || 443,
+          path: parsed.pathname + parsed.search,
+          method: 'GET',
+          headers: { ...headers, 'User-Agent': 'RunnerLens' },
+          timeout: 10_000,
+        },
+        (res: IncomingMessage) => {
+          // Follow redirects (301, 302, 307, 308)
+          const status = res.statusCode ?? 0;
+          if ([301, 302, 307, 308].includes(status) && res.headers.location) {
+            cleanup();
+            res.resume(); // drain the response
+            if (redirectsLeft <= 0) {
+              reject(new Error('too many redirects'));
+              return;
+            }
+            httpGet(res.headers.location, headers, redirectsLeft - 1)
+              .then(resolve, reject);
             return;
           }
-          httpGet(res.headers.location, headers, redirectsLeft - 1)
-            .then(resolve, reject);
-          return;
-        }
 
-        let data = '';
-        res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
-        res.on('end', () => { cleanup(); resolve({ status, body: data }); });
-      },
-    );
-    req.on('error', (e) => { cleanup(); reject(e); });
-    req.on('timeout', () => { cleanup(); req.destroy(); reject(new Error('socket timeout')); });
+          let data = '';
+          res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+          res.on('end', () => { cleanup(); resolve({ status, body: data }); });
+        },
+      );
+    } catch (e: unknown) {
+      cleanup();
+      reject(e);
+      return;
+    }
+
+    req.on('error', (e: Error) => { cleanup(); reject(e); });
+    req.on('timeout', () => { cleanup(); req!.destroy(); reject(new Error('socket timeout')); });
     req.end();
   });
 }

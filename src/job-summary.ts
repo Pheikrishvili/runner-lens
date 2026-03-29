@@ -5,14 +5,19 @@
 // line charts, and Gantt execution timeline.
 // ─────────────────────────────────────────────────────────────
 
-import * as https from 'https';
 import type { AggregatedReport } from './types';
 import { REPORT_VERSION } from './constants';
 import { fmtDuration, safeMax, safeMin } from './stats';
+import {
+  postQuickChart,
+  buildChartGetUrl,
+  QUICKCHART_URL_LIMIT,
+  CHART_VERSION,
+  CHART_BG,
+} from './quickchart-client';
 
 // ── Palette ──────────────────────────────────────────────────
 
-const CHART_BG = '#ffffff';
 const TICK = '#656d76';
 const TITLE_COLOR = '#1f2328';
 const CPU_COLOR = '#2f81f7';
@@ -23,7 +28,6 @@ const MEM_COLOR = '#8250df';
 const MEM_FILL = 'rgba(130,80,223,0.10)';
 const MEM_CACHED_COLOR = '#58a6ff';
 const MEM_SWAP_COLOR = '#da3633';
-const CHART_VERSION = '4';
 
 function fmtMem(mb: number): string {
   return `${(mb / 1024).toFixed(2)} GB`;
@@ -70,40 +74,6 @@ function escJs(s: string): string {
     .replace(/'/g, "\\'")
     .replace(/\n/g, '\\n')
     .replace(/\r/g, '\\r');
-}
-
-// ── QuickChart HTTP helper ───────────────────────────────────
-
-function postQuickChart(body: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const req = https.request(
-      'https://quickchart.io/chart/create',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      },
-      (res) => {
-        let data = '';
-        res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
-        res.on('end', () => {
-          try {
-            const parsed = JSON.parse(data) as { success: boolean; url: string };
-            if (parsed.success && parsed.url) {
-              resolve(parsed.url);
-            } else {
-              reject(new Error(`QuickChart API error: ${data}`));
-            }
-          } catch {
-            reject(new Error(`QuickChart response parse error: ${data}`));
-          }
-        });
-      },
-    );
-    req.on('error', reject);
-    req.setTimeout(5000, () => { req.destroy(); reject(new Error('QuickChart timeout')); });
-    req.write(body);
-    req.end();
-  });
 }
 
 // ── Stat Cards (rendered as image via chartjs-plugin-annotation) ──
@@ -401,15 +371,6 @@ options:{
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
-const QUICKCHART_URL_LIMIT = 1800;
-
-function buildChartUrl(config: Record<string, unknown>): string {
-  const json = JSON.stringify(config);
-  const encoded = encodeURIComponent(json);
-  const bkg = encodeURIComponent(CHART_BG);
-  return `https://quickchart.io/chart?v=${CHART_VERSION}&c=${encoded}&w=1024&h=250&bkg=${bkg}&f=png&devicePixelRatio=2`;
-}
-
 interface ExtraLine {
   label: string;
   values: number[];
@@ -490,7 +451,7 @@ async function buildQuickChart(
   const labels = timeLabels(startedAt, endedAt, data.length);
   const extraCat = extras.map(e => ({ label: e.label, data: e.data, color: e.color }));
   const config = buildChartConfig(title, data, labels, lineColor, fillColor, yLabel, extraCat);
-  let url = buildChartUrl(config);
+  let url = buildChartGetUrl(config);
   if (url.length > QUICKCHART_URL_LIMIT) {
     const body = JSON.stringify({
       version: CHART_VERSION,
