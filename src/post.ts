@@ -191,8 +191,13 @@ async function run(): Promise<void> {
     }
 
     // ── Job Summary ─────────────────────────────────────
+    // Works without an API key too: the chart service then stores the
+    // images on the free tier (7-day retention instead of 30).
     try {
-      const summaryHtml = await buildJobSummary(report, config.sampleInterval);
+      const summaryHtml = await buildJobSummary(report, config.sampleInterval, {
+        url: config.chartUrl,
+        apiKey: config.chartApiKey,
+      });
       await core.summary.addRaw(summaryHtml).write();
     } catch (e) {
       core.debug(`RunnerLens: job summary failed — ${e}`);

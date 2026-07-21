@@ -6,25 +6,17 @@ jest.mock('@actions/artifact', () => ({
   DefaultArtifactClient: jest.fn(),
 }));
 
-// Mock outbound HTTPS requests so tests never hit the network.
-// steps.ts (GitHub API) passes an options object; job-summary.ts
-// (QuickChart POST) passes a URL string — dispatch on that.
+// Mock outbound HTTPS requests (steps.ts / GitHub API) so tests never
+// hit the network.
 jest.mock('https', () => {
   const { EventEmitter } = require('events');
   const { Readable } = require('stream');
 
   const GITHUB_BODY = JSON.stringify({ jobs: [], total_count: 0 });
-  const QUICKCHART_BODY = JSON.stringify({
-    success: true,
-    url: 'https://quickchart.io/chart/render/zf-mock',
-  });
 
   return {
-    request: (urlOrOpts: unknown, optsOrCb: unknown, maybeCb?: unknown) => {
+    request: (_urlOrOpts: unknown, optsOrCb: unknown, maybeCb?: unknown) => {
       const cb = typeof optsOrCb === 'function' ? optsOrCb : maybeCb;
-      const isQuickChart =
-        typeof urlOrOpts === 'string' && urlOrOpts.includes('quickchart.io');
-      const responseBody = isQuickChart ? QUICKCHART_BODY : GITHUB_BODY;
       const req = new EventEmitter() as any;
       req.write = jest.fn();
       req.end = jest.fn(() => {
@@ -32,7 +24,7 @@ jest.mock('https', () => {
         res.statusCode = 200;
         res.headers = {};
         if (typeof cb === 'function') cb(res);
-        res.emit('data', Buffer.from(responseBody));
+        res.emit('data', Buffer.from(GITHUB_BODY));
         res.emit('end');
       });
       req.destroy = jest.fn();
@@ -41,6 +33,26 @@ jest.mock('https', () => {
     },
   };
 });
+
+// Mock global fetch (job-summary.ts → LeanCI chart service).
+const CHART_IMAGE_URL =
+  'https://storage.googleapis.com/leanci-charts-paid-dev/charts/adhoc/0123456789abcdef.png';
+const fetchMock = jest.fn(async () => ({
+  ok: true,
+  status: 201,
+  json: async () => ({ url: CHART_IMAGE_URL, tier: 'paid' }),
+}));
+(globalThis as { fetch: unknown }).fetch = fetchMock;
+beforeEach(() => {
+  fetchMock.mockClear();
+  fetchMock.mockImplementation(async () => ({
+    ok: true,
+    status: 201,
+    json: async () => ({ url: CHART_IMAGE_URL, tier: 'paid' }),
+  }));
+});
+
+const CHART_SVC = { url: 'https://chart.example.dev', apiKey: 'test-key' };
 
 import { stats, safeMax, safeMin, safePct, fmtDuration } from '../src/stats';
 import { processMetrics } from '../src/reporter';
@@ -575,24 +587,82 @@ describe('buildJobSummary', () => {
   }
 
   it('produces summary with stat cards image and footer', async () => {
-    const md = await buildJobSummary(makeReport(), 3);
+    const md = await buildJobSummary(makeReport(), 3, CHART_SVC);
     expect(md).toContain('<img');
     expect(md).toContain('Runner Stats');
     expect(md).toContain('RunnerLens');
   });
 
-  it('embeds QuickChart image URLs, never the create endpoint', async () => {
+  it('embeds bucket image URLs, never the service endpoint or key', async () => {
     const md = await buildJobSummary(makeReport({
       timeline: makeTimeline([10, 20, 30, 40, 50], [1024, 2048, 3072, 2048, 1024]),
-    }), 3);
-    expect(md).toContain('quickchart.io');
-    expect(md).not.toContain('/chart/create');
+    }), 3, CHART_SVC);
+    expect(md).toContain('storage.googleapis.com/leanci-charts-paid-dev');
+    expect(md).not.toContain(CHART_SVC.url);
+    expect(md).not.toContain(CHART_SVC.apiKey);
   });
 
-  it('includes QuickChart CPU and Memory charts when timeline has >= 2 points', async () => {
+  it('omits the x-api-key header when no key is configured', async () => {
+    await buildJobSummary(makeReport(), 3, { url: CHART_SVC.url, apiKey: '' });
+    const firstCall = fetchMock.mock.calls[0] as unknown as
+      [string, { headers: Record<string, string> }];
+    expect(firstCall[1].headers).not.toHaveProperty('x-api-key');
+  });
+
+  it('adds a retention note when the service reports the free tier', async () => {
+    fetchMock.mockImplementation(async () => ({
+      ok: true,
+      status: 201,
+      json: async () => ({
+        url: 'https://storage.googleapis.com/leanci-charts-free-dev/charts/adhoc/ff.png',
+        tier: 'free',
+      }),
+    }));
+    const md = await buildJobSummary(makeReport(), 3, { url: CHART_SVC.url, apiKey: '' });
+    expect(md).toContain('expire after 7 days');
+
+    // …and no note on the paid tier
+    fetchMock.mockImplementation(async () => ({
+      ok: true,
+      status: 201,
+      json: async () => ({ url: CHART_IMAGE_URL, tier: 'paid' }),
+    }));
+    const paidMd = await buildJobSummary(makeReport(), 3, CHART_SVC);
+    expect(paidMd).not.toContain('expire after 7 days');
+  });
+
+  it('sends JSON configs to the chart service with auth and run context', async () => {
+    process.env.GITHUB_REPOSITORY = 'leanci/web';
+    process.env.GITHUB_RUN_ID = '42';
+    try {
+      await buildJobSummary(makeReport({
+        timeline: makeTimeline([10, 20], [1024, 2048]),
+      }), 3, CHART_SVC);
+    } finally {
+      delete process.env.GITHUB_REPOSITORY;
+      delete process.env.GITHUB_RUN_ID;
+    }
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://chart.example.dev/v1/charts',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ 'x-api-key': 'test-key' }),
+      }),
+    );
+    const firstCall = fetchMock.mock.calls[0] as unknown as [string, { body: string }];
+    const body = JSON.parse(firstCall[1].body);
+    expect(body.run).toEqual({ owner: 'leanci', repo: 'web', runId: '42' });
+    expect(body.devicePixelRatio).toBe(2);
+    expect(body.chart).toBeDefined();
+    // Configs must be pure JSON — the QuickChart-era function callbacks are gone
+    expect(firstCall[1].body).not.toContain('function');
+  });
+
+  it('includes CPU and Memory charts when timeline has >= 2 points', async () => {
     const html = await buildJobSummary(makeReport({
       timeline: makeTimeline([10, 20, 30, 40, 50], [1024, 2048, 3072, 2048, 1024]),
-    }), 3);
+    }), 3, CHART_SVC);
     expect(html).toContain('<img');
     expect(html).toContain('CPU Usage');
     expect(html).toContain('Memory Usage');
@@ -605,13 +675,13 @@ describe('buildJobSummary', () => {
         { name: 'Build', number: 2, duration_seconds: 60, cpu_avg: 60, cpu_max: 92, mem_avg_mb: 3072, mem_max_mb: 5120, sample_count: 20, started_at: '2023-11-14T22:13:27Z', completed_at: '2023-11-14T22:14:27Z' },
       ],
       timeline: makeTimeline([10, 20, 30, 40, 50], [1024, 2048, 3072, 2048, 1024]),
-    }), 3);
+    }), 3, CHART_SVC);
     expect(html).toContain('<img');
     expect(html).toContain('Execution Timeline');
   });
 
   it('skips line charts when no timeline data', async () => {
-    const md = await buildJobSummary(makeReport({ timeline: undefined }), 3);
+    const md = await buildJobSummary(makeReport({ timeline: undefined }), 3, CHART_SVC);
     // Stat cards image is still present
     expect(md).toContain('Runner Stats');
     // But no CPU/Memory line charts
@@ -619,7 +689,7 @@ describe('buildJobSummary', () => {
   });
 
   it('includes footer with version', async () => {
-    const html = await buildJobSummary(makeReport(), 3);
+    const html = await buildJobSummary(makeReport(), 3, CHART_SVC);
     expect(html).toContain('v1.0.0');
     expect(html).toContain('runnerlens/runner-lens');
   });
@@ -633,7 +703,7 @@ describe('buildJobSummary', () => {
     // Value is baked into the stat cards image; verify the summary still builds
     const md = await buildJobSummary(makeReport({
       memory: { avg: 512, max: 800, min: 100, latest: 600, total_mb: 1024, swap_max_mb: 0 },
-    }), 3);
+    }), 3, CHART_SVC);
     expect(md).toContain('Runner Stats');
     expect(md).toContain('RunnerLens');
   });
@@ -643,8 +713,8 @@ describe('buildJobSummary', () => {
     const mem = Array.from({ length: 60 }, (_, i) => 1000 + i * 50);
     const md = await buildJobSummary(makeReport({
       timeline: makeTimeline(cpu, mem),
-    }), 3);
-    expect(md).toContain('quickchart.io');
+    }), 3, CHART_SVC);
+    expect(md).toContain('storage.googleapis.com');
     expect(md).toContain('CPU Usage');
     expect(md).toContain('Memory Usage');
   });

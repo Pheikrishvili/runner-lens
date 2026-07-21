@@ -57,6 +57,8 @@ export interface MonitorConfig {
   sampleInterval: number;
   maxSizeMb: number;
   githubToken: string;
+  chartUrl: string;
+  chartApiKey: string;
 }
 
 export interface MetricStats {

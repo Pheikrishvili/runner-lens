@@ -1,14 +1,86 @@
 // ─────────────────────────────────────────────────────────────
 // RunnerLens — Job Summary Builder
 //
-// Uses QuickChart.io for all visuals: stat cards, CPU/Memory
-// line charts, and Gantt execution timeline.
+// All visuals (stat cards, CPU/Memory line charts, Gantt
+// execution timeline) are rendered by the LeanCI chart service
+// (leanci/chart) — Chart.js v4 configs sent as pure JSON.
 // ─────────────────────────────────────────────────────────────
 
-import * as https from 'https';
 import type { AggregatedReport } from './types';
 import { REPORT_VERSION } from './constants';
 import { fmtDuration, safeMax, safeMin } from './stats';
+
+// ── Chart service client ─────────────────────────────────────
+
+export interface ChartServiceOptions {
+  /** Base URL of the chart service, e.g. https://chart.leanci.dev */
+  url: string;
+  apiKey: string;
+}
+
+interface RunContext {
+  owner: string;
+  repo: string;
+  runId: string;
+}
+
+function runContext(): RunContext | undefined {
+  const repository = process.env.GITHUB_REPOSITORY ?? '';
+  const runId = process.env.GITHUB_RUN_ID ?? '';
+  const [owner, repo] = repository.split('/');
+  if (!owner || !repo || !runId) return undefined;
+  return { owner, repo, runId };
+}
+
+/**
+ * Client for the chart service. A missing/invalid API key is not an
+ * error — the service falls back to the free tier (7-day image
+ * retention); a valid key selects the paid tier (30 days). The tier
+ * reported by the service is remembered for the summary footer.
+ */
+class ChartClient {
+  tier: 'free' | 'paid' | undefined;
+
+  constructor(private readonly svc: ChartServiceOptions) {}
+
+  async create(
+    chart: Record<string, unknown>,
+    width: number,
+    height: number,
+  ): Promise<string> {
+    const run = runContext();
+    const body = JSON.stringify({
+      chart,
+      width,
+      height,
+      devicePixelRatio: 2,
+      backgroundColor: CHART_BG,
+      ...(run ? { run } : {}),
+    });
+
+    const endpoint = `${this.svc.url.replace(/\/+$/, '')}/v1/charts`;
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(this.svc.apiKey ? { 'x-api-key': this.svc.apiKey } : {}),
+      },
+      body,
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      throw new Error(`chart service returned ${res.status}`);
+    }
+    const data = (await res.json()) as { url?: string; tier?: string };
+    if (!data.url) {
+      throw new Error('chart service response missing url');
+    }
+    if (data.tier === 'free' || data.tier === 'paid') {
+      this.tier = data.tier;
+    }
+    return data.url;
+  }
+}
 
 // ── Palette ──────────────────────────────────────────────────
 
@@ -23,7 +95,6 @@ const MEM_COLOR = '#8250df';
 const MEM_FILL = 'rgba(130,80,223,0.10)';
 const MEM_CACHED_COLOR = '#58a6ff';
 const MEM_SWAP_COLOR = '#da3633';
-const CHART_VERSION = '4';
 
 function fmtMem(mb: number): string {
   return `${(mb / 1024).toFixed(2)} GB`;
@@ -63,49 +134,6 @@ function shortCpuModel(model: string): string {
   return s;
 }
 
-/** Escape a string for safe embedding in a JS single-quoted string literal. */
-function escJs(s: string): string {
-  return s
-    .replace(/\\/g, '\\\\')
-    .replace(/'/g, "\\'")
-    .replace(/\n/g, '\\n')
-    .replace(/\r/g, '\\r');
-}
-
-// ── QuickChart HTTP helper ───────────────────────────────────
-
-function postQuickChart(body: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const req = https.request(
-      'https://quickchart.io/chart/create',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      },
-      (res) => {
-        let data = '';
-        res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
-        res.on('end', () => {
-          try {
-            const parsed = JSON.parse(data) as { success: boolean; url: string };
-            if (parsed.success && parsed.url) {
-              resolve(parsed.url);
-            } else {
-              reject(new Error(`QuickChart API error: ${data}`));
-            }
-          } catch {
-            reject(new Error(`QuickChart response parse error: ${data}`));
-          }
-        });
-      },
-    );
-    req.on('error', reject);
-    req.setTimeout(5000, () => { req.destroy(); reject(new Error('QuickChart timeout')); });
-    req.write(body);
-    req.end();
-  });
-}
-
 // ── Stat Cards (rendered as image via chartjs-plugin-annotation) ──
 
 function buildStatCardsConfig(report: AggregatedReport): Record<string, unknown> {
@@ -113,7 +141,7 @@ function buildStatCardsConfig(report: AggregatedReport): Record<string, unknown>
     ? shortOsName(report.system.os_release)
     : `${report.system.runner_os} (${report.system.runner_arch})`;
   const cpuModel = shortCpuModel(report.system.cpu_model);
-  const runnerSub = `${cpuModel} \u00b7 ${report.system.cpu_count} vCPU \u00b7 ${fmtMem(report.system.total_memory_mb)}`;
+  const runnerSub = `${cpuModel} · ${report.system.cpu_count} vCPU · ${fmtMem(report.system.total_memory_mb)}`;
 
   const cards = [
     { accent: '#3fb950', label: 'RUNNER', value: runnerValue, sub: runnerSub },
@@ -174,22 +202,15 @@ function buildStatCardsConfig(report: AggregatedReport): Record<string, unknown>
   };
 }
 
-async function buildStatCardsImage(report: AggregatedReport): Promise<string> {
-  const config = buildStatCardsConfig(report);
-  const body = JSON.stringify({
-    version: CHART_VERSION,
-    backgroundColor: CHART_BG,
-    width: 1024,
-    height: 100,
-    devicePixelRatio: 2,
-    format: 'png',
-    chart: config,
-  });
-  const url = await postQuickChart(body);
+async function buildStatCardsImage(
+  report: AggregatedReport,
+  client: ChartClient,
+): Promise<string> {
+  const url = await client.create(buildStatCardsConfig(report), 1024, 100);
   return `<img src="${url}" alt="Runner Stats" width="100%">`;
 }
 
-// ── QuickChart.io CPU/Memory Charts ─────────────────────────
+// ── CPU/Memory Charts ────────────────────────────────────────
 
 function downsample(values: number[], maxPoints: number): number[] {
   if (values.length <= maxPoints) return values;
@@ -234,16 +255,14 @@ const STEP_BAND_COLORS = [
   'rgba(31,111,139,0.10)',   // teal
 ];
 
-function buildChartConfig(
-  title: string,
-  values: number[],
-  labels: string[],
-  lineColor: string,
-  fillColor: string,
-  yAxisLabel: string,
-  extraLines?: { label: string; data: number[]; color: string }[],
-): Record<string, unknown> {
-  const extraDS = (extraLines ?? []).map(e => ({
+interface ExtraLineDataset {
+  label: string;
+  data: unknown[];
+  color: string;
+}
+
+function extraLineDataset(e: ExtraLineDataset): Record<string, unknown> {
+  return {
     label: e.label,
     data: e.data,
     borderColor: e.color,
@@ -253,7 +272,19 @@ function buildChartConfig(
     pointRadius: 0,
     borderWidth: 1.5,
     borderDash: [4, 3],
-  }));
+  };
+}
+
+function buildChartConfig(
+  title: string,
+  values: number[],
+  labels: string[],
+  lineColor: string,
+  fillColor: string,
+  yAxisLabel: string,
+  extraLines?: ExtraLineDataset[],
+): Record<string, unknown> {
+  const extraDS = (extraLines ?? []).map(extraLineDataset);
   const hasExtra = extraDS.length > 0;
   return {
     type: 'line',
@@ -303,10 +334,10 @@ function buildChartConfig(
 }
 
 /**
- * Build a time-axis line chart as a raw JS string config (supports tick
- * callbacks). Uses the same pattern as buildGanttChartString.
+ * Time-axis line chart with step band annotations. Tick formatting uses
+ * the chart service's declarative $format option (no code in configs).
  */
-function buildSteppedChartString(
+function buildSteppedChartConfig(
   title: string,
   dataPoints: { x: number; y: number }[],
   lineColor: string,
@@ -316,74 +347,89 @@ function buildSteppedChartString(
   xMax: number,
   steps: { name: string; startMs: number; endMs: number }[],
   yMax?: number,
-  extraLines?: { label: string; data: { x: number; y: number }[]; color: string }[],
-): string {
-  const data = JSON.stringify(dataPoints);
-  const yValues = dataPoints.map(p => p.y);
+  extraLines?: ExtraLineDataset[],
+): Record<string, unknown> {
+  const yValues = dataPoints.map((p) => p.y);
   const dataMax = yValues.length > 0 ? Math.max(...yValues) : 100;
   const chartYMax = yMax ?? dataMax * 1.15;
   const xRange = xMax - xMin;
 
-  const anns: string[] = [];
-  for (let i = 0; i < steps.length; i++) {
-    const m = steps[i];
-    const name = escJs(m.name);
-    const truncName = name.length > 20 ? name.slice(0, 17) + '...' : name;
+  const annotations: Record<string, unknown> = {};
+  steps.forEach((step, i) => {
+    const name = step.name.length > 20 ? step.name.slice(0, 17) + '...' : step.name;
 
     // Colored background band per step
-    anns.push(`sb${i}:{type:'box',xMin:${m.startMs},xMax:${m.endMs},backgroundColor:'${STEP_BAND_COLORS[i % STEP_BAND_COLORS.length]}',borderWidth:0,drawTime:'beforeDatasetsDraw'}`);
-
+    annotations[`sb${i}`] = {
+      type: 'box', xMin: step.startMs, xMax: step.endMs,
+      backgroundColor: STEP_BAND_COLORS[i % STEP_BAND_COLORS.length],
+      borderWidth: 0, drawTime: 'beforeDatasetsDraw',
+    };
     // Vertical dashed line at step start
-    anns.push(`sl${i}:{type:'line',xMin:${m.startMs},xMax:${m.startMs},borderColor:'${STEP_LINE_COLOR}',borderWidth:1,borderDash:[4,4]}`);
-
+    annotations[`sl${i}`] = {
+      type: 'line', xMin: step.startMs, xMax: step.startMs,
+      borderColor: STEP_LINE_COLOR, borderWidth: 1, borderDash: [4, 4],
+    };
     // Step name label — vertical, positioned in upper portion of band
-    const midMs = (m.startMs + m.endMs) / 2;
-    anns.push(`sn${i}:{type:'label',xValue:${midMs},yValue:${chartYMax * 0.62},content:['${truncName}'],color:'#1f2328',font:{size:9,weight:'bold'},rotation:-90,padding:{top:2,bottom:2,left:3,right:3},backgroundColor:'rgba(255,255,255,0.85)',borderRadius:3}`);
-  }
+    annotations[`sn${i}`] = {
+      type: 'label', xValue: (step.startMs + step.endMs) / 2, yValue: chartYMax * 0.62,
+      content: [name], color: '#1f2328', font: { size: 9, weight: 'bold' },
+      rotation: -90, padding: { top: 2, bottom: 2, left: 3, right: 3 },
+      backgroundColor: 'rgba(255,255,255,0.85)', borderRadius: 3,
+    };
+  });
 
-  const extraDS = (extraLines ?? []).map(e =>
-    `{label:'${escJs(e.label)}',data:${JSON.stringify(e.data)},borderColor:'${e.color}',backgroundColor:'transparent',fill:false,tension:0.4,pointRadius:0,borderWidth:1.5,borderDash:[4,3],clip:false}`
-  );
+  const extraDS = (extraLines ?? []).map((e) => ({ ...extraLineDataset(e), clip: false }));
 
-  return `{
-type:'line',
-data:{datasets:[
-  {label:'${extraDS.length > 0 ? 'total' : escJs(title)}',data:${data},borderColor:'${lineColor}',backgroundColor:'${fillColor}',fill:true,tension:0.4,pointRadius:0,borderWidth:2,clip:false}${extraDS.length > 0 ? ',' + extraDS.join(',') : ''}
-]},
-options:{
-  plugins:{
-    legend:{display:${extraDS.length > 0 ? 'true' : 'false'}${extraDS.length > 0 ? ",labels:{boxHeight:0,boxWidth:14,font:{size:10}}" : ''}},
-    title:{display:true,text:'${escJs(title)}',color:'${TITLE_COLOR}',font:{size:14,weight:'bold'},padding:{bottom:12}},
-    annotation:{annotations:{${anns.join(',')}}}
-  },
-  scales:{
-    x:{
-      type:'linear',min:${xMin - xRange * 0.01},max:${xMax + xRange * 0.01},
-      ticks:{color:'${TICK}',font:{size:10},maxRotation:0,autoSkipPadding:20,
-        callback:function(val){var d=new Date(val);return d.getUTCHours().toString().padStart(2,'0')+':'+d.getUTCMinutes().toString().padStart(2,'0')+':'+d.getUTCSeconds().toString().padStart(2,'0')}
-      },
-      grid:{display:false},
-      border:{display:false}
+  return {
+    type: 'line',
+    data: {
+      datasets: [{
+        label: extraDS.length > 0 ? 'total' : title,
+        data: dataPoints,
+        borderColor: lineColor,
+        backgroundColor: fillColor,
+        fill: true,
+        tension: 0.4,
+        pointRadius: 0,
+        borderWidth: 2,
+        clip: false,
+      }, ...extraDS],
     },
-    y:{
-      beginAtZero:true,max:${chartYMax},
-      ticks:{color:'${TICK}',font:{size:11}},
-      grid:{color:'#eff2f5'},
-      border:{display:false},
-      title:{display:true,text:'${yAxisLabel}',color:'${TICK}',font:{size:12}}
-    }
-  },
-  layout:{padding:{top:12,right:16,bottom:4,left:4}}
-}}`;
-}
-
-const QUICKCHART_URL_LIMIT = 1800;
-
-function buildChartUrl(config: Record<string, unknown>): string {
-  const json = JSON.stringify(config);
-  const encoded = encodeURIComponent(json);
-  const bkg = encodeURIComponent(CHART_BG);
-  return `https://quickchart.io/chart?v=${CHART_VERSION}&c=${encoded}&w=1024&h=250&bkg=${bkg}&f=png&devicePixelRatio=2`;
+    options: {
+      plugins: {
+        legend: extraDS.length > 0
+          ? { display: true, labels: { boxHeight: 0, boxWidth: 14, font: { size: 10 } } }
+          : { display: false },
+        title: {
+          display: true, text: title, color: TITLE_COLOR,
+          font: { size: 14, weight: 'bold' }, padding: { bottom: 12 },
+        },
+        annotation: { annotations },
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          min: xMin - xRange * 0.01,
+          max: xMax + xRange * 0.01,
+          ticks: {
+            color: TICK, font: { size: 10 }, maxRotation: 0, autoSkipPadding: 20,
+            $format: 'utc-hms',
+          },
+          grid: { display: false },
+          border: { display: false },
+        },
+        y: {
+          beginAtZero: true,
+          max: chartYMax,
+          ticks: { color: TICK, font: { size: 11 } },
+          grid: { color: '#eff2f5' },
+          border: { display: false },
+          title: { display: true, text: yAxisLabel, color: TICK, font: { size: 12 } },
+        },
+      },
+      layout: { padding: { top: 12, right: 16, bottom: 4, left: 4 } },
+    },
+  };
 }
 
 interface ExtraLine {
@@ -392,7 +438,8 @@ interface ExtraLine {
   color: string;
 }
 
-async function buildQuickChart(
+async function buildLineChart(
+  client: ChartClient,
   title: string,
   values: number[],
   yLabel: string,
@@ -409,28 +456,31 @@ async function buildQuickChart(
   const chartStartMs = new Date(startedAt).getTime();
   const chartEndMs = new Date(endedAt).getTime();
 
-  const extras = (extraLines ?? []).map(l => ({
+  const extras = (extraLines ?? []).map((l) => ({
     label: l.label,
     data: downsample(l.values, maxPts),
     color: l.color,
   }));
 
-  // ── Steps present: use linear time axis so ALL steps are visible ──
+  let config: Record<string, unknown>;
+  let height: number;
+
   if (steps && steps.length > 0) {
-    const toXY = (d: number[]) => d.map((v, i) => ({
+    // ── Steps present: linear time axis so ALL steps are visible ──
+    const toXY = (d: number[]): { x: number; y: number }[] => d.map((v, i) => ({
       x: chartStartMs + (chartEndMs - chartStartMs) * i / Math.max(d.length - 1, 1),
       y: v,
     }));
-    const dataPoints = toXY(data);
 
-    let xMin = chartStartMs;
-    let xMax = chartEndMs;
     const totalRange = chartEndMs - chartStartMs;
     const minStepMs = totalRange * 0.015;
 
+    // Axis range is locked to the data range — step bands that extend
+    // beyond the first/last sample are clipped by Chart.js, avoiding
+    // empty space on either side of the chart.
     const stepRegions = steps
-      .filter(s => s.started_at && s.completed_at)
-      .map(s => {
+      .filter((s) => s.started_at && s.completed_at)
+      .map((s) => {
         const sMs = new Date(s.started_at).getTime();
         const eMs = new Date(s.completed_at).getTime();
         return {
@@ -440,53 +490,25 @@ async function buildQuickChart(
         };
       });
 
-    // Axis range is locked to the data range — step bands that extend
-    // beyond the first/last sample are clipped by Chart.js, avoiding
-    // empty space on either side of the chart.
+    const extraXY = extras.map((e) => ({ label: e.label, data: toXY(e.data), color: e.color }));
 
-    const extraXY = extras.map(e => ({ label: e.label, data: toXY(e.data), color: e.color }));
-
-    const chartStr = buildSteppedChartString(
-      title, dataPoints, lineColor, fillColor, yLabel, xMin, xMax, stepRegions, yMax, extraXY,
+    config = buildSteppedChartConfig(
+      title, toXY(data), lineColor, fillColor, yLabel,
+      chartStartMs, chartEndMs, stepRegions, yMax, extraXY,
     );
-    const body = JSON.stringify({
-      version: CHART_VERSION,
-      backgroundColor: CHART_BG,
-      width: 1024,
-      height: 300,
-      devicePixelRatio: 2,
-      format: 'png',
-      chart: chartStr,
-    });
-    const url = await postQuickChart(body);
-    return `<img src="${url}" alt="${esc(title)}" width="100%">`;
+    height = 300;
+  } else {
+    // ── No steps: category axis with pre-formatted labels ──
+    const labels = timeLabels(startedAt, endedAt, data.length);
+    config = buildChartConfig(title, data, labels, lineColor, fillColor, yLabel, extras);
+    height = 250;
   }
 
-  // ── No steps: use category axis (supports compact GET URLs) ──
-  const labels = timeLabels(startedAt, endedAt, data.length);
-  const extraCat = extras.map(e => ({ label: e.label, data: e.data, color: e.color }));
-  const config = buildChartConfig(title, data, labels, lineColor, fillColor, yLabel, extraCat);
-  let url = buildChartUrl(config);
-  if (url.length > QUICKCHART_URL_LIMIT) {
-    const body = JSON.stringify({
-      version: CHART_VERSION,
-      backgroundColor: CHART_BG,
-      width: 1024,
-      height: 250,
-      devicePixelRatio: 2,
-      format: 'png',
-      chart: config,
-    });
-    try {
-      url = await postQuickChart(body);
-    } catch {
-      // If POST fails, use long GET URL anyway
-    }
-  }
+  const url = await client.create(config, 1024, height);
   return `<img src="${url}" alt="${esc(title)}" width="100%">`;
 }
 
-// ── Gantt Timeline (QuickChart.io horizontal bar chart) ──────
+// ── Gantt Timeline (horizontal bar chart) ────────────────────
 
 interface GanttJob {
   jobName: string;
@@ -502,16 +524,14 @@ function collectGanttSteps(report: AggregatedReport): GanttJob | null {
   return null;
 }
 
-function buildGanttChartString(ganttJob: GanttJob): string {
+function buildGanttChartConfig(ganttJob: GanttJob): Record<string, unknown> {
   interface Row { label: string; startMs: number; endMs: number; durStr: string }
-  const rows: Row[] = [];
-
-  for (const step of ganttJob.steps) {
-    const name = step.name.length > 28 ? step.name.slice(0, 25) + '...' : step.name;
-    const sMs = new Date(step.started_at).getTime();
-    const eMs = new Date(step.completed_at).getTime();
-    rows.push({ label: name, startMs: sMs, endMs: eMs, durStr: fmtDuration(Math.round((eMs - sMs) / 1000)) });
-  }
+  const rows: Row[] = ganttJob.steps.map((step) => {
+    const label = step.name.length > 28 ? step.name.slice(0, 25) + '...' : step.name;
+    const startMs = new Date(step.started_at).getTime();
+    const endMs = new Date(step.completed_at).getTime();
+    return { label, startMs, endMs, durStr: fmtDuration(Math.round((endMs - startMs) / 1000)) };
+  });
 
   const globalMin = safeMin(rows.map((r) => r.startMs));
   const globalMax = safeMax(rows.map((r) => r.endMs));
@@ -520,96 +540,113 @@ function buildGanttChartString(ganttJob: GanttJob): string {
   const minBarWidth = range * 0.003;
   const durLabelPad = range * 0.10;
 
-  const labels = JSON.stringify(rows.map((r) => r.label));
-  const data = rows.map((r) => {
-    const w = r.endMs - r.startMs;
-    const end = w < minBarWidth ? r.startMs + minBarWidth : r.endMs;
-    return `[${r.startMs},${end}]`;
-  }).join(',');
-  const bgColors = JSON.stringify(rows.map(() => GANTT_COLOR));
+  const annotations: Record<string, unknown> = {};
 
-  const anns: string[] = [];
-
-  // Alternating row backgrounds
-  for (let i = 0; i < rows.length; i++) {
-    anns.push(`tr${i}:{type:'box',drawTime:'beforeDatasetsDraw',xMin:${globalMin},xMax:${globalMax},yMin:${i - 0.5},yMax:${i + 0.5},backgroundColor:'${i % 2 === 0 ? '#f6f8fa' : '#eff2f5'}',borderWidth:0}`);
-  }
-
-  // Duration labels on right
-  for (let i = 0; i < rows.length; i++) {
-    anns.push(`du${i}:{type:'label',drawTime:'afterDatasetsDraw',xValue:${globalMax + durLabelPad * 0.5},yValue:${i},content:['${rows[i].durStr}'],color:'${TICK}',font:{size:10}}`);
-  }
-
-  return `{
-type:'bar',
-data:{labels:${labels},datasets:[{data:[${data}],backgroundColor:${bgColors},borderWidth:0,borderRadius:4,borderSkipped:false,barPercentage:0.7,categoryPercentage:1.0}]},
-options:{
-  indexAxis:'y',
-  plugins:{
-    legend:{display:false},
-    title:{display:true,text:'Execution Timeline',color:'${TITLE_COLOR}',font:{size:14,weight:'bold'},padding:{bottom:8}},
-    annotation:{annotations:{${anns.join(',')}}}
-  },
-  scales:{
-    x:{
-      type:'linear',min:${globalMin - range * 0.01},max:${globalMax + durLabelPad},
-      ticks:{color:'${TICK}',font:{size:10},maxRotation:0,
-        callback:function(val){if(val>${globalMax})return '';var d=new Date(val);return d.getUTCHours().toString().padStart(2,'0')+':'+d.getUTCMinutes().toString().padStart(2,'0')+':'+d.getUTCSeconds().toString().padStart(2,'0')}
-      },
-      grid:{display:false},
-      border:{display:false}
-    },
-    y:{
-      ticks:{color:'${TICK}',font:{size:11},padding:6},
-      grid:{display:false},
-      border:{display:false}
-    }
-  },
-  layout:{padding:{right:8,left:4,top:4,bottom:4}}
-}}`;
-}
-
-async function buildGanttChart(ganttJob: GanttJob): Promise<string> {
-  const height = Math.max(160, Math.min(700, 56 + ganttJob.steps.length * 26));
-  const chartStr = buildGanttChartString(ganttJob);
-
-  const body = JSON.stringify({
-    version: CHART_VERSION,
-    backgroundColor: CHART_BG,
-    width: 1024,
-    height,
-    devicePixelRatio: 2,
-    format: 'png',
-    chart: chartStr,
+  rows.forEach((row, i) => {
+    // Alternating row backgrounds
+    annotations[`tr${i}`] = {
+      type: 'box', drawTime: 'beforeDatasetsDraw',
+      xMin: globalMin, xMax: globalMax, yMin: i - 0.5, yMax: i + 0.5,
+      backgroundColor: i % 2 === 0 ? '#f6f8fa' : '#eff2f5', borderWidth: 0,
+    };
+    // Duration labels on right
+    annotations[`du${i}`] = {
+      type: 'label', drawTime: 'afterDatasetsDraw',
+      xValue: globalMax + durLabelPad * 0.5, yValue: i,
+      content: [row.durStr], color: TICK, font: { size: 10 },
+    };
   });
 
-  const url = await postQuickChart(body);
+  return {
+    type: 'bar',
+    data: {
+      labels: rows.map((r) => r.label),
+      datasets: [{
+        data: rows.map((r) => {
+          const width = r.endMs - r.startMs;
+          const end = width < minBarWidth ? r.startMs + minBarWidth : r.endMs;
+          return [r.startMs, end];
+        }),
+        backgroundColor: rows.map(() => GANTT_COLOR),
+        borderWidth: 0,
+        borderRadius: 4,
+        borderSkipped: false,
+        barPercentage: 0.7,
+        categoryPercentage: 1.0,
+      }],
+    },
+    options: {
+      indexAxis: 'y',
+      plugins: {
+        legend: { display: false },
+        title: {
+          display: true, text: 'Execution Timeline', color: TITLE_COLOR,
+          font: { size: 14, weight: 'bold' }, padding: { bottom: 8 },
+        },
+        annotation: { annotations },
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          min: globalMin - range * 0.01,
+          max: globalMax + durLabelPad,
+          ticks: {
+            color: TICK, font: { size: 10 }, maxRotation: 0,
+            // Hide ticks in the duration-label gutter beyond the last bar
+            $format: 'utc-hms',
+            $hideAbove: globalMax,
+          },
+          grid: { display: false },
+          border: { display: false },
+        },
+        y: {
+          ticks: { color: TICK, font: { size: 11 }, padding: 6 },
+          grid: { display: false },
+          border: { display: false },
+        },
+      },
+      layout: { padding: { right: 8, left: 4, top: 4, bottom: 4 } },
+    },
+  };
+}
+
+async function buildGanttChart(
+  ganttJob: GanttJob,
+  client: ChartClient,
+): Promise<string> {
+  const height = Math.max(160, Math.min(700, 56 + ganttJob.steps.length * 26));
+  const url = await client.create(buildGanttChartConfig(ganttJob), 1024, height);
   return `<img src="${url}" alt="Execution Timeline" width="100%">`;
 }
 
 // ── Helpers: per-job section ─────────────────────────────────
 
-async function buildJobSection(report: AggregatedReport, sampleInterval: number): Promise<string> {
+async function buildJobSection(
+  report: AggregatedReport,
+  sampleInterval: number,
+  client: ChartClient,
+): Promise<string> {
   const parts: string[] = [];
 
   // Stat cards
   try {
-    parts.push(await buildStatCardsImage(report));
+    parts.push(await buildStatCardsImage(report, client));
   } catch {
-    // Best-effort: skip the stat cards if QuickChart is unavailable
+    // Best-effort: skip the stat cards if the chart service is unavailable
   }
 
   // CPU + Memory charts
   // Filter out steps whose duration is <= the scrape interval
   // (they are too short to meaningfully display on the chart)
-  const chartSteps = report.steps?.filter(s => {
+  const chartSteps = report.steps?.filter((s) => {
     const durSec = (new Date(s.completed_at).getTime() - new Date(s.started_at).getTime()) / 1000;
     return durSec > sampleInterval;
   });
   const timeline = report.timeline;
   if (timeline && timeline.cpu_pct.length >= 2) {
     try {
-      parts.push(await buildQuickChart(
+      parts.push(await buildLineChart(
+        client,
         'CPU Usage (%)', timeline.cpu_pct, 'CPU %',
         CPU_COLOR, CPU_FILL,
         report.started_at, report.ended_at,
@@ -620,9 +657,10 @@ async function buildJobSection(report: AggregatedReport, sampleInterval: number)
           { label: 'system', values: timeline.cpu_system, color: CPU_SYS_COLOR },
         ],
       ));
-      const toGb = (v: number) => Math.round((v / 1024) * 100) / 100;
+      const toGb = (v: number): number => Math.round((v / 1024) * 100) / 100;
       const memGb = timeline.mem_mb.map(toGb);
-      parts.push(await buildQuickChart(
+      parts.push(await buildLineChart(
+        client,
         'Memory Usage (GB)', memGb, 'GB',
         MEM_COLOR, MEM_FILL,
         report.started_at, report.ended_at,
@@ -642,19 +680,30 @@ async function buildJobSection(report: AggregatedReport, sampleInterval: number)
 
 // ── Public API ───────────────────────────────────────────────
 
-export async function buildJobSummary(report: AggregatedReport, sampleInterval: number): Promise<string> {
+export async function buildJobSummary(
+  report: AggregatedReport,
+  sampleInterval: number,
+  svc: ChartServiceOptions,
+): Promise<string> {
   const parts: string[] = [];
+  const client = new ChartClient(svc);
 
-  parts.push(await buildJobSection(report, sampleInterval));
+  parts.push(await buildJobSection(report, sampleInterval, client));
 
   // Gantt timeline
   const ganttJob = collectGanttSteps(report);
   if (ganttJob) {
     try {
-      parts.push(await buildGanttChart(ganttJob));
+      parts.push(await buildGanttChart(ganttJob, client));
     } catch {
-      // Best-effort: skip the timeline if QuickChart is unavailable
+      // Best-effort: skip the timeline if the chart service is unavailable
     }
+  }
+
+  if (client.tier === 'free') {
+    parts.push(
+      '<sub>Charts are stored on the free tier and expire after 7 days — set <code>chart-api-key</code> for 30-day retention.</sub>',
+    );
   }
 
   parts.push(

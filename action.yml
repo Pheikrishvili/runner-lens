@@ -25,6 +25,17 @@ inputs:
     description: 'Upload metrics report as a workflow artifact (true/false)'
     required: false
     default: 'true'
+  chart-url:
+    description: 'Base URL of the LeanCI chart rendering service'
+    required: false
+    default: 'https://chart.leanci.dev'
+  chart-api-key:
+    description: >
+      API key for the chart rendering service (store as a repository
+      secret). Without a key charts still render on the free tier
+      (7-day image retention); a valid key gives 30-day retention.
+    required: false
+    default: ''
 
 outputs:
   cpu-avg:

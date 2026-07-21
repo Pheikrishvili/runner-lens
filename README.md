@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: runnerlens/runner-lens@v1   # ← add this line
+        with:
+          chart-api-key: ${{ secrets.LEANCI_CHART_API_KEY }}
       - uses: actions/checkout@v4
       - run: npm ci && npm test
 ```
@@ -26,7 +28,7 @@ That's it. When the job finishes, you'll see a resource report in the **Job Summ
 - **Per-Step Breakdown** — step bands overlaid on the charts plus a Gantt execution timeline (requires `actions: read` permission)
 - **Report artifact** — the full aggregated report as `report.json`, including complete metric timelines (CPU idle/iowait/steal, memory available/usage %, 1/5/15-minute load averages)
 
-Charts are rendered as PNG images via [QuickChart.io](https://quickchart.io). Chart configurations (metric values, step names, and timings) are sent to QuickChart and the resulting images are hosted there.
+Charts are rendered as PNG images by the self-hosted **LeanCI chart service** (`leanci/chart`) — Chart.js v4 configs sent as pure JSON, images stored in LeanCI GCS buckets. No metric data leaves LeanCI infrastructure. Retention is tiered: without a `chart-api-key` images live **7 days** (free tier); with a valid key, **30 days** (paid tier).
 
 ## Inputs
 
@@ -36,6 +38,8 @@ Charts are rendered as PNG images via [QuickChart.io](https://quickchart.io). Ch
 | `github-token` | `${{ github.token }}` | GitHub token for per-step metrics |
 | `max-file-size` | `100` | Max metrics file size in MB before rotation (0 = unlimited) |
 | `upload-artifact` | `true` | Upload the aggregated report as a workflow artifact |
+| `chart-url` | `https://chart.leanci.dev` | Base URL of the LeanCI chart rendering service |
+| `chart-api-key` | `''` | Chart service API key (store as a secret); empty = free tier, 7-day image retention |
 
 ## Outputs
 
@@ -128,7 +132,7 @@ npm run build        # esbuild → dist/ (checked in — rebuild after src chang
 │   ├── stats.ts               # Stack-safe stats & formatting helpers
 │   ├── steps.ts               # GitHub API step fetch & correlation
 │   ├── reporter.ts            # Sample aggregation
-│   └── job-summary.ts         # QuickChart-based Job Summary rendering
+│   └── job-summary.ts         # Job Summary rendering via the LeanCI chart service
 ├── dist/                      # Bundled JS (checked in)
 └── __tests__/                 # Jest test suite
 ```
