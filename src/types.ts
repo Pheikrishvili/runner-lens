@@ -97,8 +97,16 @@ export interface AggregatedReport {
     cpu_user: number[];   // user CPU %
     cpu_nice: number[];   // nice CPU %
     cpu_system: number[]; // system CPU %
-    mem_mb: number[];     // memory usage in MB
+    cpu_idle: number[];   // idle CPU %
+    cpu_iowait: number[]; // I/O wait CPU %
+    cpu_steal: number[];  // hypervisor steal CPU %
+    mem_mb: number[];         // memory usage in MB
+    mem_available_mb: number[]; // available memory in MB
     mem_cached_mb: number[];  // filesystem cache in MB
     mem_swap_mb: number[];    // swap usage in MB
+    mem_usage_pct: number[];  // memory usage %, 0-100
+    load_1m: number[];    // 1-minute load average
+    load_5m: number[];    // 5-minute load average
+    load_15m: number[];   // 15-minute load average
   };
 }

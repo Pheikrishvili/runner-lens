@@ -2,7 +2,7 @@
 
 **Zero-config observability for GitHub Actions runners.**
 
-Drop RunnerLens into any workflow and get CPU and memory metrics with sparkline charts directly in your Job Summary — no infrastructure required.
+Drop RunnerLens into any workflow and get CPU and memory metrics with charts directly in your Job Summary — no infrastructure required.
 
 ## Quick Start
 
@@ -20,29 +20,22 @@ That's it. When the job finishes, you'll see a resource report in the **Job Summ
 
 ## What You Get
 
-- **CPU** — average, peak, p95, p99 with sparkline timeline
-- **Memory** — usage, swap detection, pressure alerts
-- **Per-Step Breakdown** — CPU/memory usage and duration for each workflow step
-- **Collector Overhead** — RunnerLens' own CPU/memory footprint
-- **Alerts** — threshold-based warnings for CPU, memory, swap, I/O wait, CPU steal
-- **Recommendations** — right-sizing advice (oversized runner, CPU saturation)
-- **Top Processes** — peak CPU consumers across the job
+- **Stat cards** — runner specs, job duration, CPU and memory averages/peaks
+- **CPU chart** — total usage with user/nice/system breakdown over time
+- **Memory chart** — usage with cache and swap breakdown over time
+- **Per-Step Breakdown** — step bands overlaid on the charts plus a Gantt execution timeline (requires `actions: read` permission)
+- **Report artifact** — the full aggregated report as `report.json`, including complete metric timelines (CPU idle/iowait/steal, memory available/usage %, 1/5/15-minute load averages)
+
+Charts are rendered as PNG images via [QuickChart.io](https://quickchart.io). Chart configurations (metric values, step names, and timings) are sent to QuickChart and the resulting images are hosted there.
 
 ## Inputs
 
 | Input | Default | Description |
 |---|---|---|
-| `api-key` | `''` | RunnerLens SaaS API key (optional) |
-| `api-endpoint` | `https://api.runnerlens.com` | API endpoint override |
-| `sample-interval` | `3` | Seconds between samples (1–30) |
-| `include-processes` | `true` | Capture top processes |
-| `github-token` | `''` | GitHub token for per-step metrics (optional) |
-| `summary-style` | `full` | Report detail: `full` \| `compact` \| `minimal` \| `none` |
+| `sample-interval` | `5` | Seconds between samples (1–60) |
+| `github-token` | `${{ github.token }}` | GitHub token for per-step metrics |
 | `max-file-size` | `100` | Max metrics file size in MB before rotation (0 = unlimited) |
-| `threshold-cpu-warn` | `80` | CPU % warning threshold |
-| `threshold-cpu-crit` | `95` | CPU % critical threshold |
-| `threshold-mem-warn` | `80` | Memory % warning threshold |
-| `threshold-mem-crit` | `95` | Memory % critical threshold |
+| `upload-artifact` | `true` | Upload the aggregated report as a workflow artifact |
 
 ## Outputs
 
@@ -50,13 +43,12 @@ That's it. When the job finishes, you'll see a resource report in the **Job Summ
 |---|---|---|
 | `cpu-avg` | `34.2` | Average CPU usage % |
 | `cpu-max` | `87.1` | Peak CPU usage % |
-| `cpu-p95` | `72.5` | 95th percentile CPU % |
 | `mem-avg-mb` | `2048` | Average memory usage (MB) |
 | `mem-max-mb` | `3584` | Peak memory usage (MB) |
 | `mem-avg-pct` | `56.3` | Average memory usage % |
 | `samples` | `120` | Number of samples collected |
 | `duration-seconds` | `360` | Monitoring wall-clock duration |
-| `report-json` | `{...}` | Full report as JSON |
+| `report-json` | `{...}` | Aggregated report as JSON (timelines omitted to stay under GitHub's 1 MB output limit — the full report is in the artifact) |
 
 ### Using Outputs
 
@@ -66,12 +58,12 @@ That's it. When the job finishes, you'll see a resource report in the **Job Summ
 
 - run: npm ci && npm test
 
-- name: Fail if CPU was critically high
+- name: Fail if peak CPU was critically high
   if: always()
   run: |
-    cpu_p95="${{ steps.lens.outputs.cpu-p95 }}"
-    if (( $(echo "$cpu_p95 > 95" | bc -l) )); then
-      echo "::error::CPU p95 was ${cpu_p95}%"
+    cpu_max="${{ steps.lens.outputs.cpu-max }}"
+    if (( $(echo "$cpu_max > 95" | bc -l) )); then
+      echo "::error::Peak CPU was ${cpu_max}%"
       exit 1
     fi
 ```
@@ -81,9 +73,11 @@ That's it. When the job finishes, you'll see a resource report in the **Job Summ
 RunnerLens uses a two-phase design:
 
 1. **Main step** — spawns a lightweight bash collector as a detached background process
-2. **Post step** (`post-if: always()`) — stops the collector, aggregates data, writes the Job Summary
+2. **Post step** (`post-if: always()`) — stops the collector, aggregates data, writes the Job Summary, and uploads the report artifact
 
-The bash collector reads directly from `/proc` (CPU, memory) with <0.5% CPU overhead. It outputs one JSON line per sample to a temp file.
+The bash collector reads from cgroup v2 when available (containers) and falls back to `/proc` (VMs), with <0.5% CPU overhead. It outputs one JSON line per sample to a temp file, and also records its own CPU/memory footprint with every sample.
+
+Monitoring is best-effort by design: any failure is logged as a warning and never fails your workflow.
 
 ### File Rotation
 
@@ -94,7 +88,7 @@ For long-running jobs (multi-hour builds on self-hosted runners), the collector 
 ```
 ┌─────────────┐     ┌──────────────┐     ┌────────────────┐
 │  main step  │────▶│  collect.sh  │────▶│  metrics.jsonl │
-│  (spawn)    │     │  (detached)  │     │  (JSONL /proc) │
+│  (spawn)    │     │  (detached)  │     │ (JSONL samples)│
 └─────────────┘     └──────────────┘     └────────────────┘
                                                 │
 ┌─────────────┐     ┌──────────────┐            │
@@ -104,23 +98,12 @@ For long-running jobs (multi-hour builds on self-hosted runners), the collector 
                            │
               ┌────────────┼────────────┐
               ▼            ▼            ▼
-        Job Summary    Outputs    API (optional)
+        Job Summary    Outputs    report.json artifact
 ```
 
-## SaaS Dashboard (Coming Soon)
+## The Report Artifact
 
-Add an `api-key` to unlock:
-
-- **Historical trends** across runs
-- **Cross-workflow comparisons**
-- **Team-wide cost analytics**
-- **Slack/email alerting**
-
-```yaml
-- uses: runnerlens/runner-lens@v1
-  with:
-    api-key: ${{ secrets.RUNNERLENS_API_KEY }}
-```
+With `upload-artifact: true` (the default), each job uploads a `runner-lens-<job>` artifact containing `report.json`: system info, aggregate CPU/memory/load statistics, per-step metrics, and full per-sample timelines (`cpu_pct`, `cpu_user`, `cpu_nice`, `cpu_system`, `cpu_idle`, `cpu_iowait`, `cpu_steal`, `mem_mb`, `mem_available_mb`, `mem_cached_mb`, `mem_swap_mb`, `mem_usage_pct`, `load_1m`, `load_5m`, `load_15m`). This is the data contract for downstream tooling such as the upcoming RunnerLens SaaS dashboard (historical trends, right-sizing recommendations, and cost analytics).
 
 ## Development
 
@@ -128,30 +111,26 @@ Add an `api-key` to unlock:
 npm ci
 npm run typecheck    # TypeScript strict mode
 npm test             # Jest with coverage
-npm run build        # esbuild → dist/
+npm run build        # esbuild → dist/ (checked in — rebuild after src changes)
 ```
 
 ### Project Structure
 
 ```
 ├── action.yml                 # GitHub Action definition
-├── scripts/collect.sh         # Bash /proc collector (v2)
+├── scripts/collect.sh         # Bash collector (cgroup v2 + /proc)
 ├── src/
 │   ├── main.ts                # Entry: spawn collector
 │   ├── post.ts                # Post: stop, aggregate, report
 │   ├── config.ts              # Input parsing & validation
 │   ├── constants.ts           # Shared paths & state keys
 │   ├── types.ts               # All TypeScript interfaces
-│   ├── system-info.ts         # Static runner metadata
-│   ├── stats.ts               # Percentile, avg, min/max (stack-safe)
-│   ├── charts.ts              # ASCII sparklines & formatting
-│   ├── alerts.ts              # Threshold evaluation
-│   ├── recommendations.ts     # Right-sizing engine
-│   ├── reporter.ts            # Aggregation + markdown generation
-│   └── api-client.ts          # SaaS upload (gzip, retries)
+│   ├── stats.ts               # Stack-safe stats & formatting helpers
+│   ├── steps.ts               # GitHub API step fetch & correlation
+│   ├── reporter.ts            # Sample aggregation
+│   └── job-summary.ts         # QuickChart-based Job Summary rendering
 ├── dist/                      # Bundled JS (checked in)
-├── __tests__/                 # Jest test suite
-└── .github/workflows/ci.yml   # CI with dogfooding
+└── __tests__/                 # Jest test suite
 ```
 
 ## License

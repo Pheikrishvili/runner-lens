@@ -51,9 +51,17 @@ function aggregate(
     cpu_user: samples.map(s => s.cpu.user),
     cpu_nice: samples.map(s => s.cpu.nice),
     cpu_system: samples.map(s => s.cpu.system),
+    cpu_idle: samples.map(s => s.cpu.idle),
+    cpu_iowait: samples.map(s => s.cpu.iowait),
+    cpu_steal: samples.map(s => s.cpu.steal),
     mem_mb: memUsed,
+    mem_available_mb: samples.map(s => s.memory.available_mb),
     mem_cached_mb: samples.map(s => s.memory.cached_mb),
     mem_swap_mb: swapUsed,
+    mem_usage_pct: samples.map(s => s.memory.usage_pct),
+    load_1m: loadVals,
+    load_5m: samples.map(s => s.load?.load5 ?? 0),
+    load_15m: samples.map(s => s.load?.load15 ?? 0),
   } : undefined;
 
   const report: AggregatedReport = {

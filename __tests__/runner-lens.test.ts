@@ -7,19 +7,29 @@ jest.mock('@actions/artifact', () => ({
 }));
 
 // Mock outbound HTTPS requests so tests never hit the network.
-// Used by steps.ts (GitHub API) — job-summary.ts uses GET URLs (no network).
+// steps.ts (GitHub API) passes an options object; job-summary.ts
+// (QuickChart POST) passes a URL string — dispatch on that.
 jest.mock('https', () => {
   const { EventEmitter } = require('events');
   const { Readable } = require('stream');
 
-  function makeMockRequest(responseBody: string, statusCode = 200) {
-    return (_urlOrOpts: unknown, optsOrCb: unknown, maybeCb?: unknown) => {
+  const GITHUB_BODY = JSON.stringify({ jobs: [], total_count: 0 });
+  const QUICKCHART_BODY = JSON.stringify({
+    success: true,
+    url: 'https://quickchart.io/chart/render/zf-mock',
+  });
+
+  return {
+    request: (urlOrOpts: unknown, optsOrCb: unknown, maybeCb?: unknown) => {
       const cb = typeof optsOrCb === 'function' ? optsOrCb : maybeCb;
+      const isQuickChart =
+        typeof urlOrOpts === 'string' && urlOrOpts.includes('quickchart.io');
+      const responseBody = isQuickChart ? QUICKCHART_BODY : GITHUB_BODY;
       const req = new EventEmitter() as any;
       req.write = jest.fn();
       req.end = jest.fn(() => {
         const res = new Readable({ read() {} }) as any;
-        res.statusCode = statusCode;
+        res.statusCode = 200;
         res.headers = {};
         if (typeof cb === 'function') cb(res);
         res.emit('data', Buffer.from(responseBody));
@@ -28,13 +38,7 @@ jest.mock('https', () => {
       req.destroy = jest.fn();
       req.setTimeout = jest.fn();
       return req;
-    };
-  }
-
-  return {
-    request: makeMockRequest(
-      JSON.stringify({ jobs: [], total_count: 0 }),
-    ),
+    },
   };
 });
 
@@ -197,6 +201,21 @@ describe('processMetrics', () => {
     expect(report.timeline).toBeDefined();
     expect(report.timeline!.cpu_pct).toHaveLength(100);
     expect(report.timeline!.mem_mb).toHaveLength(100);
+  });
+
+  it('exports every collected metric in the timeline', () => {
+    const s1 = makeSample({ timestamp: 1700000000 });
+    const s2 = makeSample({ timestamp: 1700000003 });
+    const { report } = processMetrics([s1, s2], makeSysInfo(), 6);
+    const timeline = report.timeline!;
+    expect(timeline.cpu_idle).toEqual([55, 55]);
+    expect(timeline.cpu_iowait).toEqual([3, 3]);
+    expect(timeline.cpu_steal).toEqual([2, 2]);
+    expect(timeline.mem_available_mb).toEqual([4096, 4096]);
+    expect(timeline.mem_usage_pct).toEqual([42.9, 42.9]);
+    expect(timeline.load_1m).toEqual([1.5, 1.5]);
+    expect(timeline.load_5m).toEqual([1.2, 1.2]);
+    expect(timeline.load_15m).toEqual([0.9, 0.9]);
   });
 
   it('omits timeline for single sample', () => {
@@ -532,67 +551,75 @@ describe('buildJobSummary', () => {
     };
   }
 
-  it('produces summary with stat cards image and footer', () => {
-    const md = buildJobSummary(makeReport(), 3);
+  function makeTimeline(
+    cpu: number[],
+    mem: number[],
+  ): NonNullable<AggregatedReport['timeline']> {
+    return {
+      cpu_pct: cpu,
+      cpu_user: cpu.map((v) => v * 0.7),
+      cpu_nice: cpu.map(() => 0),
+      cpu_system: cpu.map((v) => v * 0.3),
+      cpu_idle: cpu.map((v) => 100 - v),
+      cpu_iowait: cpu.map(() => 1),
+      cpu_steal: cpu.map(() => 0),
+      mem_mb: mem,
+      mem_available_mb: mem.map((v) => 7168 - v),
+      mem_cached_mb: mem.map((v) => v * 0.1),
+      mem_swap_mb: mem.map(() => 0),
+      mem_usage_pct: mem.map((v) => (v / 7168) * 100),
+      load_1m: cpu.map((v) => v / 50),
+      load_5m: cpu.map((v) => v / 60),
+      load_15m: cpu.map((v) => v / 70),
+    };
+  }
+
+  it('produces summary with stat cards image and footer', async () => {
+    const md = await buildJobSummary(makeReport(), 3);
     expect(md).toContain('<img');
     expect(md).toContain('Runner Stats');
     expect(md).toContain('RunnerLens');
   });
 
-  it('generates GET URLs (not expiring POST short URLs)', () => {
-    const md = buildJobSummary(makeReport(), 3);
-    expect(md).toContain('quickchart.io/chart?');
-    expect(md).not.toContain('/chart/render/');
+  it('embeds QuickChart image URLs, never the create endpoint', async () => {
+    const md = await buildJobSummary(makeReport({
+      timeline: makeTimeline([10, 20, 30, 40, 50], [1024, 2048, 3072, 2048, 1024]),
+    }), 3);
+    expect(md).toContain('quickchart.io');
     expect(md).not.toContain('/chart/create');
   });
 
-  it('includes QuickChart CPU and Memory charts when timeline has >= 2 points', () => {
-    const html = buildJobSummary(makeReport({
-      timeline: {
-        cpu_pct: [10, 20, 30, 40, 50],
-        cpu_user: [8, 15, 22, 30, 38],
-        cpu_nice: [0, 0, 0, 0, 0],
-        cpu_system: [2, 5, 8, 10, 12],
-        mem_mb: [1024, 2048, 3072, 2048, 1024],
-        mem_cached_mb: [200, 300, 400, 350, 250],
-        mem_swap_mb: [0, 0, 10, 20, 5],
-      },
+  it('includes QuickChart CPU and Memory charts when timeline has >= 2 points', async () => {
+    const html = await buildJobSummary(makeReport({
+      timeline: makeTimeline([10, 20, 30, 40, 50], [1024, 2048, 3072, 2048, 1024]),
     }), 3);
     expect(html).toContain('<img');
     expect(html).toContain('CPU Usage');
     expect(html).toContain('Memory Usage');
   });
 
-  it('includes Gantt chart image when steps are present', () => {
-    const html = buildJobSummary(makeReport({
+  it('includes Gantt chart image when steps are present', async () => {
+    const html = await buildJobSummary(makeReport({
       steps: [
         { name: 'Checkout', number: 1, duration_seconds: 6, cpu_avg: 20, cpu_max: 40, mem_avg_mb: 1024, mem_max_mb: 2048, sample_count: 2, started_at: '2023-11-14T22:13:20Z', completed_at: '2023-11-14T22:13:26Z' },
         { name: 'Build', number: 2, duration_seconds: 60, cpu_avg: 60, cpu_max: 92, mem_avg_mb: 3072, mem_max_mb: 5120, sample_count: 20, started_at: '2023-11-14T22:13:27Z', completed_at: '2023-11-14T22:14:27Z' },
       ],
-      timeline: {
-        cpu_pct: [10, 20, 30, 40, 50],
-        cpu_user: [8, 15, 22, 30, 38],
-        cpu_nice: [0, 0, 0, 0, 0],
-        cpu_system: [2, 5, 8, 10, 12],
-        mem_mb: [1024, 2048, 3072, 2048, 1024],
-        mem_cached_mb: [200, 300, 400, 350, 250],
-        mem_swap_mb: [0, 0, 10, 20, 5],
-      },
+      timeline: makeTimeline([10, 20, 30, 40, 50], [1024, 2048, 3072, 2048, 1024]),
     }), 3);
     expect(html).toContain('<img');
     expect(html).toContain('Execution Timeline');
   });
 
-  it('skips line charts when no timeline data', () => {
-    const md = buildJobSummary(makeReport({ timeline: undefined }), 3);
+  it('skips line charts when no timeline data', async () => {
+    const md = await buildJobSummary(makeReport({ timeline: undefined }), 3);
     // Stat cards image is still present
     expect(md).toContain('Runner Stats');
     // But no CPU/Memory line charts
     expect(md).not.toContain('CPU Usage');
   });
 
-  it('includes footer with version', () => {
-    const html = buildJobSummary(makeReport(), 3);
+  it('includes footer with version', async () => {
+    const html = await buildJobSummary(makeReport(), 3);
     expect(html).toContain('v1.0.0');
     expect(html).toContain('runnerlens/runner-lens');
   });
@@ -602,20 +629,20 @@ describe('buildJobSummary', () => {
     expect(fmtDuration(120)).toBe('2m');
   });
 
-  it('formats memory < 1024 MB as MB (fmtMem via stat cards)', () => {
+  it('formats memory < 1024 MB as MB (fmtMem via stat cards)', async () => {
     // Value is baked into the stat cards image; verify the summary still builds
-    const md = buildJobSummary(makeReport({
+    const md = await buildJobSummary(makeReport({
       memory: { avg: 512, max: 800, min: 100, latest: 600, total_mb: 1024, swap_max_mb: 0 },
     }), 3);
     expect(md).toContain('Runner Stats');
     expect(md).toContain('RunnerLens');
   });
 
-  it('downsamples long timelines and skips labels', () => {
+  it('downsamples long timelines and skips labels', async () => {
     const cpu = Array.from({ length: 60 }, (_, i) => 20 + (i % 30));
     const mem = Array.from({ length: 60 }, (_, i) => 1000 + i * 50);
-    const md = buildJobSummary(makeReport({
-      timeline: { cpu_pct: cpu, cpu_user: cpu.map(v => v * 0.7), cpu_nice: cpu.map(() => 0), cpu_system: cpu.map(v => v * 0.3), mem_mb: mem, mem_cached_mb: mem.map(v => v * 0.1), mem_swap_mb: mem.map(() => 0) },
+    const md = await buildJobSummary(makeReport({
+      timeline: makeTimeline(cpu, mem),
     }), 3);
     expect(md).toContain('quickchart.io');
     expect(md).toContain('CPU Usage');

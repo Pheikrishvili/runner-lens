@@ -108,8 +108,7 @@ function postQuickChart(body: string): Promise<string> {
 
 // ── Stat Cards (rendered as image via chartjs-plugin-annotation) ──
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-function buildStatCardsConfig(report: AggregatedReport): Record<string, any> {
+function buildStatCardsConfig(report: AggregatedReport): Record<string, unknown> {
   const runnerValue = report.system.os_release !== 'unknown'
     ? shortOsName(report.system.os_release)
     : `${report.system.runner_os} (${report.system.runner_arch})`;
@@ -123,7 +122,7 @@ function buildStatCardsConfig(report: AggregatedReport): Record<string, any> {
     { accent: '#bc8cff', label: 'MEMORY', value: `avg ${fmtMem(report.memory.avg)}`, sub: `peak ${fmtMem(report.memory.max)} / ${fmtMem(report.memory.total_mb)}` },
   ];
 
-  const annotations: Record<string, any> = {};
+  const annotations: Record<string, unknown> = {};
 
   cards.forEach((c, i) => {
     const xMin = i + 0.03;
@@ -190,25 +189,6 @@ async function buildStatCardsImage(report: AggregatedReport): Promise<string> {
   return `<img src="${url}" alt="Runner Stats" width="100%">`;
 }
 
-/** Markdown fallback if image rendering fails */
-function buildStatCardsFallback(report: AggregatedReport): string {
-  const runnerValue = report.system.os_release !== 'unknown'
-    ? shortOsName(report.system.os_release)
-    : `${report.system.runner_os} (${report.system.runner_arch})`;
-  const cpuModel = shortCpuModel(report.system.cpu_model);
-  const specs = `${cpuModel} \u00b7 ${report.system.cpu_count} vCPU \u00b7 ${fmtMem(report.system.total_memory_mb)}`;
-  const dur = fmtDuration(report.duration_seconds);
-
-  return [
-    `> **${runnerValue}** \u00b7 ${specs} \u00b7 **${dur}**`,
-    '',
-    '| Metric | Average | Peak |',
-    '|:--|--:|--:|',
-    `| **CPU** | ${report.cpu.avg.toFixed(1)}% | ${report.cpu.max.toFixed(1)}% |`,
-    `| **Memory** | ${fmtMem(report.memory.avg)} | ${fmtMem(report.memory.max)} / ${fmtMem(report.memory.total_mb)} |`,
-  ].join('\n');
-}
-
 // ── QuickChart.io CPU/Memory Charts ─────────────────────────
 
 function downsample(values: number[], maxPoints: number): number[] {
@@ -254,7 +234,6 @@ const STEP_BAND_COLORS = [
   'rgba(31,111,139,0.10)',   // teal
 ];
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
 function buildChartConfig(
   title: string,
   values: number[],
@@ -263,7 +242,7 @@ function buildChartConfig(
   fillColor: string,
   yAxisLabel: string,
   extraLines?: { label: string; data: number[]; color: string }[],
-): Record<string, any> {
+): Record<string, unknown> {
   const extraDS = (extraLines ?? []).map(e => ({
     label: e.label,
     data: e.data,
@@ -366,7 +345,6 @@ function buildSteppedChartString(
     `{label:'${escJs(e.label)}',data:${JSON.stringify(e.data)},borderColor:'${e.color}',backgroundColor:'transparent',fill:false,tension:0.4,pointRadius:0,borderWidth:1.5,borderDash:[4,3],clip:false}`
   );
 
-  /* eslint-disable no-useless-escape */
   return `{
 type:'line',
 data:{datasets:[
@@ -397,9 +375,7 @@ options:{
   },
   layout:{padding:{top:12,right:16,bottom:4,left:4}}
 }}`;
-  /* eslint-enable no-useless-escape */
 }
-/* eslint-enable @typescript-eslint/no-explicit-any */
 
 const QUICKCHART_URL_LIMIT = 1800;
 
@@ -564,7 +540,6 @@ function buildGanttChartString(ganttJob: GanttJob): string {
     anns.push(`du${i}:{type:'label',drawTime:'afterDatasetsDraw',xValue:${globalMax + durLabelPad * 0.5},yValue:${i},content:['${rows[i].durStr}'],color:'${TICK}',font:{size:10}}`);
   }
 
-  /* eslint-disable no-useless-escape */
   return `{
 type:'bar',
 data:{labels:${labels},datasets:[{data:[${data}],backgroundColor:${bgColors},borderWidth:0,borderRadius:4,borderSkipped:false,barPercentage:0.7,categoryPercentage:1.0}]},
@@ -592,7 +567,6 @@ options:{
   },
   layout:{padding:{right:8,left:4,top:4,bottom:4}}
 }}`;
-  /* eslint-enable no-useless-escape */
 }
 
 async function buildGanttChart(ganttJob: GanttJob): Promise<string> {
@@ -613,25 +587,6 @@ async function buildGanttChart(ganttJob: GanttJob): Promise<string> {
   return `<img src="${url}" alt="Execution Timeline" width="100%">`;
 }
 
-/** Mermaid fallback if QuickChart fails */
-function buildGanttFallback(ganttJob: GanttJob): string {
-  const lines: string[] = [
-    '```mermaid',
-    'gantt',
-    '  title Execution Timeline',
-    '  dateFormat x',
-    '  axisFormat %H:%M:%S',
-    `  section ${ganttJob.jobName.replace(/[:;]/g, '-')}`,
-  ];
-  for (const step of ganttJob.steps) {
-    const s = new Date(step.started_at).getTime();
-    const e = new Date(step.completed_at).getTime();
-    lines.push(`  ${step.name.replace(/[:;]/g, '-')} : ${s}, ${e}`);
-  }
-  lines.push('```');
-  return lines.join('\n');
-}
-
 // ── Helpers: per-job section ─────────────────────────────────
 
 async function buildJobSection(report: AggregatedReport, sampleInterval: number): Promise<string> {
@@ -641,7 +596,7 @@ async function buildJobSection(report: AggregatedReport, sampleInterval: number)
   try {
     parts.push(await buildStatCardsImage(report));
   } catch {
-    parts.push(buildStatCardsFallback(report));
+    // Best-effort: skip the stat cards if QuickChart is unavailable
   }
 
   // CPU + Memory charts
@@ -698,7 +653,7 @@ export async function buildJobSummary(report: AggregatedReport, sampleInterval: 
     try {
       parts.push(await buildGanttChart(ganttJob));
     } catch {
-      parts.push(buildGanttFallback(ganttJob));
+      // Best-effort: skip the timeline if QuickChart is unavailable
     }
   }
 
