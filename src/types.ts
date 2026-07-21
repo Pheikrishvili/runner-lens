@@ -58,7 +58,8 @@ export interface MonitorConfig {
   maxSizeMb: number;
   githubToken: string;
   chartUrl: string;
-  chartApiKey: string;
+  /** LeanCI API key — one key for all paid features (charts, SaaS ingestion). */
+  apiKey: string;
 }
 
 export interface MetricStats {

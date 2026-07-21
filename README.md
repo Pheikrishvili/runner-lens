@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: runnerlens/runner-lens@v1   # ← add this line
         with:
-          chart-api-key: ${{ secrets.LEANCI_CHART_API_KEY }}
+          leanci-api-key: ${{ secrets.LEANCI_API_KEY }}
       - uses: actions/checkout@v4
       - run: npm ci && npm test
 ```
@@ -28,7 +28,7 @@ That's it. When the job finishes, you'll see a resource report in the **Job Summ
 - **Per-Step Breakdown** — step bands overlaid on the charts plus a Gantt execution timeline (requires `actions: read` permission)
 - **Report artifact** — the full aggregated report as `report.json`, including complete metric timelines (CPU idle/iowait/steal, memory available/usage %, 1/5/15-minute load averages)
 
-Charts are rendered as PNG images by the self-hosted **LeanCI chart service** (`leanci/chart`) — Chart.js v4 configs sent as pure JSON, images stored in LeanCI GCS buckets. No metric data leaves LeanCI infrastructure. Retention is tiered: without a `chart-api-key` images live **7 days** (free tier); with a valid key, **30 days** (paid tier).
+Charts are rendered as PNG images by the self-hosted **LeanCI chart service** (`leanci/chart`) — Chart.js v4 configs sent as pure JSON, images stored in LeanCI GCS buckets. No metric data leaves LeanCI infrastructure. Retention is tiered: without a `leanci-api-key` images live **14 days** (free tier); with a valid LeanCI API key, **90 days** (paid tier — matching GitHub's own log retention). The same key will unlock metric ingestion into the LeanCI dashboard.
 
 ## Inputs
 
@@ -39,7 +39,7 @@ Charts are rendered as PNG images by the self-hosted **LeanCI chart service** (`
 | `max-file-size` | `100` | Max metrics file size in MB before rotation (0 = unlimited) |
 | `upload-artifact` | `true` | Upload the aggregated report as a workflow artifact |
 | `chart-url` | `https://chart.leanci.dev` | Base URL of the LeanCI chart rendering service |
-| `chart-api-key` | `''` | Chart service API key (store as a secret); empty = free tier, 7-day image retention |
+| `leanci-api-key` | `''` | LeanCI API key (store as a secret); empty = free tier, 14-day image retention |
 
 ## Outputs
 

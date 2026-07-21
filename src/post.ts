@@ -192,11 +192,11 @@ async function run(): Promise<void> {
 
     // ── Job Summary ─────────────────────────────────────
     // Works without an API key too: the chart service then stores the
-    // images on the free tier (7-day retention instead of 30).
+    // images on the free tier (14-day retention instead of 90).
     try {
       const summaryHtml = await buildJobSummary(report, config.sampleInterval, {
         url: config.chartUrl,
-        apiKey: config.chartApiKey,
+        apiKey: config.apiKey,
       });
       await core.summary.addRaw(summaryHtml).write();
     } catch (e) {

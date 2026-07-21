@@ -25,6 +25,6 @@ export function parseConfig(): MonitorConfig {
     maxSizeMb: Math.max(0, intInput('max-file-size', 100)),
     githubToken,
     chartUrl: core.getInput('chart-url') || 'https://chart.leanci.dev',
-    chartApiKey: core.getInput('chart-api-key'),
+    apiKey: core.getInput('leanci-api-key'),
   };
 }
