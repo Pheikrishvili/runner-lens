@@ -28,7 +28,24 @@ That's it. When the job finishes, you'll see a resource report in the **Job Summ
 - **Per-Step Breakdown** — step bands overlaid on the charts plus a Gantt execution timeline (requires `actions: read` permission)
 - **Report artifact** — the full aggregated report as `report.json`, including complete metric timelines (CPU idle/iowait/steal, memory available/usage %, 1/5/15-minute load averages)
 
-Charts are rendered as PNG images by the self-hosted **LeanCI chart service** (`leanci/chart`) — Chart.js v4 configs sent as pure JSON, images stored in LeanCI GCS buckets. No metric data leaves LeanCI infrastructure. Retention is tiered: without a `leanci-api-key` images live **14 days** (free tier); with a valid LeanCI API key, **90 days** (paid tier — matching GitHub's own log retention). The same key will unlock metric ingestion into the LeanCI dashboard.
+Charts are rendered as PNG images by the **LeanCI chart service** — Chart.js v4 configs sent as pure JSON, images stored in LeanCI GCS buckets. Nothing is sent to third-party chart services — rendering runs on LeanCI's own infrastructure. Retention is tiered: without a `leanci-api-key` images live **14 days** (free tier); with a valid LeanCI API key, **90 days** (paid tier — matching GitHub's own log retention). The same key will unlock metric ingestion into the LeanCI dashboard.
+
+## Data collection & privacy
+
+Using RunnerLens sends some telemetry to LeanCI so it can render your charts and, for account holders, power your dashboards. In plain terms:
+
+**What is collected**
+- **Resource metrics** — CPU, memory, swap, load, and I/O timings sampled from the runner's kernel interfaces: **cgroup v2** on container-based runners, **`/proc`** on VM-based runners.
+- **Job & step metadata** — your workflow's **job name and step names**, their durations, and pass/fail status.
+- **Repository context** — the GitHub **owner/organization, repository name, and run ID** (used to organize your images and dashboards).
+- **Runner specs** — OS, CPU model, core count, and memory size.
+
+**What is never collected**
+- Your **source code**, **secrets**, **environment variables**, **build logs**, file contents, or command output. RunnerLens reads kernel resource counters (cgroup/`/proc`) and the GitHub jobs API — never your code.
+
+**Where it goes & how long it stays**
+- Chart images (which visually contain the above) are stored in LeanCI's GCS buckets under random, hashed object names and **auto-deleted after 14 days** (free) or **90 days** (with an API key).
+- With a `leanci-api-key`, the aggregated `report.json` is also ingested.
 
 ## Inputs
 
