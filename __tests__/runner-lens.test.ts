@@ -295,8 +295,8 @@ describe('correlateSteps', () => {
 
     const steps = correlateSteps(
       [
-        { name: 'Checkout', number: 1, status: 'completed', started_at: '2023-11-14T22:13:20Z', completed_at: '2023-11-14T22:13:26Z' },
-        { name: 'Build', number: 2, status: 'completed', started_at: '2023-11-14T22:13:27Z', completed_at: '2023-11-14T22:13:33Z' },
+        { name: 'Checkout', number: 1, status: 'completed', conclusion: 'success', started_at: '2023-11-14T22:13:20Z', completed_at: '2023-11-14T22:13:26Z' },
+        { name: 'Build', number: 2, status: 'completed', conclusion: 'success', started_at: '2023-11-14T22:13:27Z', completed_at: '2023-11-14T22:13:33Z' },
       ],
       samples,
     );
@@ -317,14 +317,14 @@ describe('correlateSteps', () => {
   it('returns empty for empty inputs', () => {
     expect(correlateSteps([], [makeSample()])).toEqual([]);
     expect(correlateSteps(
-      [{ name: 'X', number: 1, status: 'completed', started_at: '2023-01-01T00:00:00Z', completed_at: '2023-01-01T00:01:00Z' }],
+      [{ name: 'X', number: 1, status: 'completed', conclusion: 'success', started_at: '2023-01-01T00:00:00Z', completed_at: '2023-01-01T00:01:00Z' }],
       [],
     )).toEqual([]);
   });
 
   it('handles steps with no matching samples', () => {
     const steps = correlateSteps(
-      [{ name: 'Quick', number: 1, status: 'completed', started_at: '2020-01-01T00:00:00Z', completed_at: '2020-01-01T00:00:01Z' }],
+      [{ name: 'Quick', number: 1, status: 'completed', conclusion: 'success', started_at: '2020-01-01T00:00:00Z', completed_at: '2020-01-01T00:00:01Z' }],
       [makeSample({ timestamp: 1700000000 })],
     );
     expect(steps[0].sample_count).toBe(0);
@@ -339,7 +339,7 @@ describe('correlateSteps', () => {
       makeSample({ timestamp: 1700000003 }),
     ];
     const steps = correlateSteps(
-      [{ name: 'Running', number: 1, status: 'in_progress', started_at: '2023-11-14T22:13:20Z', completed_at: null }],
+      [{ name: 'Running', number: 1, status: 'in_progress', conclusion: null, started_at: '2023-11-14T22:13:20Z', completed_at: null }],
       samples,
     );
     expect(steps).toHaveLength(1);
@@ -350,8 +350,8 @@ describe('correlateSteps', () => {
   it('skips steps without started_at', () => {
     const steps = correlateSteps(
       [
-        { name: 'Pending', number: 1, status: 'queued', started_at: null, completed_at: null },
-        { name: 'Done', number: 2, status: 'completed', started_at: '2023-11-14T22:13:20Z', completed_at: '2023-11-14T22:13:30Z' },
+        { name: 'Pending', number: 1, status: 'queued', conclusion: null, started_at: null, completed_at: null },
+        { name: 'Done', number: 2, status: 'completed', conclusion: 'success', started_at: '2023-11-14T22:13:20Z', completed_at: '2023-11-14T22:13:30Z' },
       ],
       [makeSample({ timestamp: 1700000000 })],
     );
@@ -467,7 +467,7 @@ describe('fetchSteps (GitHub API)', () => {
           name: 'build (node-20, ubuntu)',
           status: 'in_progress',
           started_at: '2023-11-14T22:13:20Z',
-          steps: [{ name: 'Checkout', number: 1, status: 'completed', started_at: '2023-11-14T22:13:20Z', completed_at: '2023-11-14T22:13:25Z' }],
+          steps: [{ name: 'Checkout', number: 1, status: 'completed', conclusion: 'success', started_at: '2023-11-14T22:13:20Z', completed_at: '2023-11-14T22:13:25Z' }],
         },
       ],
       total_count: 1,
@@ -493,6 +493,55 @@ describe('fetchSteps (GitHub API)', () => {
     expect(result.steps).toHaveLength(1);
     expect(result.steps[0].name).toBe('Checkout');
     expect(result.jobStartedAt).toBe('2023-11-14T22:13:20Z');
+
+    https.request = origRequest;
+  });
+
+  it('derives job conclusion "failure" from a failed step while the job is in_progress', async () => {
+    process.env.GITHUB_REPOSITORY = 'owner/repo';
+    process.env.GITHUB_RUN_ID = '123';
+    process.env.GITHUB_JOB = 'build';
+
+    const https = require('https');
+    const { EventEmitter } = require('events');
+    const { Readable } = require('stream');
+    const origRequest = https.request;
+
+    const apiResponse = JSON.stringify({
+      jobs: [
+        {
+          name: 'build',
+          status: 'in_progress', // job (incl. this post step) not done yet
+          conclusion: null,
+          started_at: '2023-11-14T22:13:20Z',
+          steps: [
+            { name: 'Checkout', number: 1, status: 'completed', conclusion: 'success', started_at: '2023-11-14T22:13:20Z', completed_at: '2023-11-14T22:13:25Z' },
+            { name: 'Test', number: 2, status: 'completed', conclusion: 'failure', started_at: '2023-11-14T22:13:25Z', completed_at: '2023-11-14T22:14:00Z' },
+            { name: 'RunnerLens', number: 3, status: 'in_progress', conclusion: null, started_at: '2023-11-14T22:14:00Z', completed_at: null },
+          ],
+        },
+      ],
+      total_count: 1,
+    });
+
+    https.request = jest.fn((_opts: unknown, cb: (res: any) => void) => {
+      const req = new EventEmitter() as any;
+      req.write = jest.fn();
+      req.end = jest.fn(() => {
+        const res = new Readable({ read() {} }) as any;
+        res.statusCode = 200;
+        res.headers = {};
+        cb(res);
+        res.emit('data', Buffer.from(apiResponse));
+        res.emit('end');
+      });
+      req.destroy = jest.fn();
+      req.setTimeout = jest.fn();
+      return req;
+    });
+
+    const result = await fetchSteps('token');
+    expect(result.jobConclusion).toBe('failure');
 
     https.request = origRequest;
   });

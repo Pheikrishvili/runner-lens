@@ -14,6 +14,8 @@ interface RunContext {
   runId: string;
   job: string;
   workflow?: string;
+  /** Job outcome (success | failure | cancelled | timed_out); omitted if unknown. */
+  conclusion?: string;
 }
 
 function runContext(): RunContext | undefined {
@@ -45,9 +47,12 @@ export async function ingestReport(
   report: AggregatedReport,
   apiUrl: string,
   apiKey: string,
+  conclusion?: string,
 ): Promise<IngestResult> {
   const run = runContext();
   if (!run) throw new Error('missing GITHUB_REPOSITORY/RUN_ID/JOB env vars');
+  // Derived from the completed steps in post.ts — env has no job-status var.
+  if (conclusion) run.conclusion = conclusion;
 
   const endpoint = `${apiUrl.replace(/\/+$/, '')}/v1/ingest`;
   const res = await fetch(endpoint, {

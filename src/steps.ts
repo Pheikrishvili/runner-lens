@@ -12,6 +12,7 @@ interface GitHubStep {
   name: string;
   number: number;
   status: string;
+  conclusion: string | null;
   started_at: string | null;
   completed_at: string | null;
 }
@@ -19,6 +20,7 @@ interface GitHubStep {
 interface GitHubJob {
   name: string;
   status: string;
+  conclusion: string | null;
   started_at: string | null;
   steps: GitHubStep[];
 }
@@ -26,6 +28,26 @@ interface GitHubJob {
 export interface FetchStepsResult {
   steps: GitHubStep[];
   jobStartedAt?: string;
+  /** success | failure | cancelled | timed_out — omitted if it can't be determined. */
+  jobConclusion?: string;
+}
+
+/**
+ * Infer the job's outcome. At post-time the job's own `conclusion` is still
+ * null (the job — including this always()-post step — is in_progress), so we
+ * fall back to reducing the completed steps the way GitHub does: any failure
+ * wins, then timed-out, then cancelled, else success. Steps still running
+ * (this collector) or skipped don't decide the outcome.
+ */
+function deriveConclusion(job: GitHubJob): string | undefined {
+  if (job.conclusion) return job.conclusion;
+  const done = job.steps.filter((s) => s.status === 'completed' && s.conclusion);
+  if (done.length === 0) return undefined;
+  const has = (c: string): boolean => done.some((s) => s.conclusion === c);
+  if (has('failure')) return 'failure';
+  if (has('timed_out')) return 'timed_out';
+  if (has('cancelled')) return 'cancelled';
+  return 'success';
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -149,6 +171,7 @@ export async function fetchSteps(token: string): Promise<FetchStepsResult> {
   return {
     steps: current.steps ?? [],
     jobStartedAt: current.started_at ?? undefined,
+    jobConclusion: deriveConclusion(current),
   };
 }
 

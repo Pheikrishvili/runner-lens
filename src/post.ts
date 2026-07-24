@@ -194,7 +194,7 @@ async function run(): Promise<void> {
     // ── Ingest report (paid tier — requires a LeanCI API key) ──
     if (config.apiKey) {
       try {
-        const result = await ingestReport(report, config.apiUrl, config.apiKey);
+        const result = await ingestReport(report, config.apiUrl, config.apiKey, fetchResult.jobConclusion);
         core.info(`RunnerLens: report ingested — ${result.path ?? 'stored'}`);
       } catch (e) {
         core.debug(`RunnerLens: report ingest failed — ${e}`);
