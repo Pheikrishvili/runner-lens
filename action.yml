@@ -28,13 +28,17 @@ inputs:
   chart-url:
     description: 'Base URL of the LeanCI chart rendering service'
     required: false
-    default: 'https://chart.leanci.dev'
+    default: 'https://chart.dev.leanci.dev'
+  api-url:
+    description: 'Base URL of the LeanCI ingest API'
+    required: false
+    default: 'https://api.dev.leanci.dev'
   leanci-api-key:
     description: >
       LeanCI API key (store as a repository secret). One key unlocks all
       LeanCI paid features: without it charts render on the free tier
-      (14-day image retention); a valid key gives 90-day retention and,
-      soon, metric ingestion into the LeanCI dashboard.
+      (14-day image retention); a valid key gives 90-day retention and
+      ingests the report into the LeanCI dashboard.
     required: false
     default: ''
 

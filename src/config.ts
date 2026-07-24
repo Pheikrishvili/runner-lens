@@ -24,7 +24,8 @@ export function parseConfig(): MonitorConfig {
     sampleInterval: clamp(intInput('sample-interval', 5), 1, 60),
     maxSizeMb: Math.max(0, intInput('max-file-size', 100)),
     githubToken,
-    chartUrl: core.getInput('chart-url') || 'https://chart.leanci.dev',
+    chartUrl: core.getInput('chart-url') || 'https://chart.dev.leanci.dev',
+    apiUrl: core.getInput('api-url') || 'https://api.dev.leanci.dev',
     apiKey: core.getInput('leanci-api-key'),
   };
 }

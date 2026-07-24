@@ -28,7 +28,7 @@ That's it. When the job finishes, you'll see a resource report in the **Job Summ
 - **Per-Step Breakdown** — step bands overlaid on the charts plus a Gantt execution timeline (requires `actions: read` permission)
 - **Report artifact** — the full aggregated report as `report.json`, including complete metric timelines (CPU idle/iowait/steal, memory available/usage %, 1/5/15-minute load averages)
 
-Charts are rendered as PNG images by the **LeanCI chart service** — Chart.js v4 configs sent as pure JSON, images stored in LeanCI GCS buckets. Nothing is sent to third-party chart services — rendering runs on LeanCI's own infrastructure. Retention is tiered: without a `leanci-api-key` images live **14 days** (free tier); with a valid LeanCI API key, **90 days** (paid tier — matching GitHub's own log retention). The same key will unlock metric ingestion into the LeanCI dashboard.
+Charts are rendered as PNG images by the **LeanCI chart service** — Chart.js v4 configs sent as pure JSON, images stored in LeanCI GCS buckets. Nothing is sent to third-party chart services — rendering runs on LeanCI's own infrastructure. Retention is tiered: without a `leanci-api-key` images live **14 days** (free tier); with a valid LeanCI API key, **90 days** (paid tier — matching GitHub's own log retention). The same key also ingests the report into the LeanCI dashboard.
 
 ## Data collection & privacy
 
@@ -55,8 +55,9 @@ Using RunnerLens sends some telemetry to LeanCI so it can render your charts and
 | `github-token` | `${{ github.token }}` | GitHub token for per-step metrics |
 | `max-file-size` | `100` | Max metrics file size in MB before rotation (0 = unlimited) |
 | `upload-artifact` | `true` | Upload the aggregated report as a workflow artifact |
-| `chart-url` | `https://chart.leanci.dev` | Base URL of the LeanCI chart rendering service |
-| `leanci-api-key` | `''` | LeanCI API key (store as a secret); empty = free tier, 14-day image retention |
+| `chart-url` | `https://chart.dev.leanci.dev` | Base URL of the LeanCI chart rendering service |
+| `api-url` | `https://api.dev.leanci.dev` | Base URL of the LeanCI ingest API |
+| `leanci-api-key` | `''` | LeanCI API key (store as a secret); empty = free tier, 14-day image retention, no ingestion |
 
 ## Outputs
 

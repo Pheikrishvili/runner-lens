@@ -8,6 +8,7 @@ import { parseConfig } from './config';
 import { processMetrics } from './reporter';
 import { safePct } from './stats';
 import { fetchSteps, correlateSteps, type FetchStepsResult } from './steps';
+import { ingestReport } from './ingest';
 
 import { buildJobSummary } from './job-summary';
 import {
@@ -187,6 +188,16 @@ async function run(): Promise<void> {
         core.info(`RunnerLens: uploaded artifact "${artifactName}"`);
       } catch (e) {
         core.debug(`RunnerLens: artifact upload failed — ${e}`);
+      }
+    }
+
+    // ── Ingest report (paid tier — requires a LeanCI API key) ──
+    if (config.apiKey) {
+      try {
+        const result = await ingestReport(report, config.apiUrl, config.apiKey);
+        core.info(`RunnerLens: report ingested — ${result.path ?? 'stored'}`);
+      } catch (e) {
+        core.debug(`RunnerLens: report ingest failed — ${e}`);
       }
     }
 
