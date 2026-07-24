@@ -15,10 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      # ── Dogfood: monitor this CI job ────────────────────────
-      - uses: runnerlens/runner-lens@main
-
       - uses: actions/checkout@v6
+
+      # ── Dogfood: monitor this CI job (local checkout — this repo) ──
+      - uses: ./
 
       - uses: actions/setup-node@v6
         with:
@@ -34,6 +34,9 @@ jobs:
   integration:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      cpu-avg: ${{ steps.lens.outputs.cpu-avg }}
+      samples: ${{ steps.lens.outputs.samples }}
     steps:
       - uses: actions/checkout@v6
 
@@ -53,10 +56,18 @@ jobs:
 
       - run: sleep 10
 
-      # Post step runs automatically; then check outputs
+      # Outputs are only set by the action's post step, which runs after
+      # every step in this job — so they can't be checked here. They're
+      # promoted to job outputs above and checked in verify-outputs instead.
+
+  verify-outputs:
+    needs: integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
       - name: Verify outputs exist
         run: |
-          echo "CPU avg: ${{ steps.lens.outputs.cpu-avg }}"
-          echo "Samples: ${{ steps.lens.outputs.samples }}"
-          test -n "${{ steps.lens.outputs.cpu-avg }}" || exit 1
-          test -n "${{ steps.lens.outputs.samples }}" || exit 1
+          echo "CPU avg: ${{ needs.integration.outputs.cpu-avg }}"
+          echo "Samples: ${{ needs.integration.outputs.samples }}"
+          test -n "${{ needs.integration.outputs.cpu-avg }}" || exit 1
+          test -n "${{ needs.integration.outputs.samples }}" || exit 1

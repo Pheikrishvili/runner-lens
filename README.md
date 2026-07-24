@@ -73,21 +73,38 @@ Using RunnerLens sends some telemetry to LeanCI so it can render your charts and
 
 ### Using Outputs
 
+RunnerLens sets its outputs (`cpu-avg`, `cpu-max`, etc.) from its **post step**,
+which runs after every other step in the job has already finished. That means
+outputs are never available to a later step *in the same job* — only to a
+different job that declares `needs:` on this one, via `jobs.<job>.outputs`:
+
 ```yaml
-- uses: runnerlens/runner-lens@v1
-  id: lens
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      cpu-max: ${{ steps.lens.outputs.cpu-max }}
+    steps:
+      - uses: runnerlens/runner-lens@v1
+        id: lens
+      - run: npm ci && npm test
 
-- run: npm ci && npm test
-
-- name: Fail if peak CPU was critically high
-  if: always()
-  run: |
-    cpu_max="${{ steps.lens.outputs.cpu-max }}"
-    if (( $(echo "$cpu_max > 95" | bc -l) )); then
-      echo "::error::Peak CPU was ${cpu_max}%"
-      exit 1
-    fi
+  check-cpu:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if peak CPU was critically high
+        run: |
+          cpu_max="${{ needs.build.outputs.cpu-max }}"
+          if (( $(echo "$cpu_max > 95" | bc -l) )); then
+            echo "::error::Peak CPU was ${cpu_max}%"
+            exit 1
+          fi
 ```
+
+If you need the data within the same job instead, read `report-json`'s value
+from `core.summary`/the uploaded artifact — that data is written before the
+post step ends, but a same-job step still can't read it via `steps.*.outputs`.
 
 ## Architecture
 
