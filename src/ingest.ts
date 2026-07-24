@@ -13,15 +13,22 @@ interface RunContext {
   repo: string;
   runId: string;
   job: string;
+  workflow?: string;
 }
 
 function runContext(): RunContext | undefined {
   const repository = process.env.GITHUB_REPOSITORY ?? '';
   const runId = process.env.GITHUB_RUN_ID ?? '';
   const job = process.env.GITHUB_JOB ?? '';
+  // Workflow name lets the dashboard group workloads by (repo × workflow × job);
+  // without it core buckets everything under 'default'. Trim empty, cap to core's
+  // 200-char limit so a long name can't make it reject the whole ingest.
+  const workflow = (process.env.GITHUB_WORKFLOW ?? '').trim();
   const [owner, repo] = repository.split('/');
   if (!owner || !repo || !runId || !job) return undefined;
-  return { owner, repo, runId, job };
+  const run: RunContext = { owner, repo, runId, job };
+  if (workflow) run.workflow = workflow.slice(0, 200);
+  return run;
 }
 
 export interface IngestResult {
