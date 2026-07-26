@@ -8,3 +8,6 @@ coverage
 # Generated preview files
 gen-preview.*
 preview-*
+
+# Local-only living plan (matches the core/ and app/ repos)
+PLAN.md
