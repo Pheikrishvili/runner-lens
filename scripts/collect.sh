@@ -7,7 +7,12 @@
 # Writes one JSON line per sample to the output file.
 #
 # Usage: collect.sh <output> <interval> [--max-size=N]
+#
+# The reader helpers below deliberately return space-separated fields that are
+# split into positional parameters via `set -- $(...)`. That word splitting is
+# the mechanism, not an accident, so SC2046/SC2086 are disabled file-wide.
 # ─────────────────────────────────────────────────────────────
+# shellcheck disable=SC2046,SC2086
 set -eu
 
 OUT="${1:?Usage: collect.sh <output> <interval> [--max-size=N]}"

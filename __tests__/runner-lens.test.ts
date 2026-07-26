@@ -58,6 +58,9 @@ import { stats, safeMax, safeMin, safePct, fmtDuration } from '../src/stats';
 import { processMetrics } from '../src/reporter';
 import { correlateSteps, fetchSteps } from '../src/steps';
 import { buildJobSummary } from '../src/job-summary';
+import { errMsg } from '../src/errors';
+import { parseConfig } from '../src/config';
+import { ingestReport } from '../src/ingest';
 import type {
   MetricSample, SystemInfo, AggregatedReport,
 } from '../src/types';
@@ -174,7 +177,7 @@ describe('processMetrics', () => {
   it('produces a complete report', () => {
     const s1 = makeSample({ timestamp: 1700000000 });
     const s2 = makeSample({ timestamp: 1700000003 });
-    const { report } = processMetrics(
+    const report = processMetrics(
       [s1, s2], makeSysInfo(), 6,
     );
 
@@ -188,7 +191,7 @@ describe('processMetrics', () => {
 
   it('handles zero-duration gracefully (no NaN/Infinity)', () => {
     const s = makeSample();
-    const { report } = processMetrics([s], makeSysInfo(), 0);
+    const report = processMetrics([s], makeSysInfo(), 0);
     expect(Number.isFinite(report.cpu.avg)).toBe(true);
     expect(Number.isFinite(report.memory.avg)).toBe(true);
   });
@@ -197,7 +200,7 @@ describe('processMetrics', () => {
     const s = makeSample({
       memory: { total_mb: 7168, used_mb: 6000, available_mb: 1168, cached_mb: 512, swap_total_mb: 2048, swap_used_mb: 768, usage_pct: 83.7 },
     });
-    const { report } = processMetrics([s], makeSysInfo(), 3);
+    const report = processMetrics([s], makeSysInfo(), 3);
     expect(report.memory.swap_max_mb).toBe(768);
   });
 
@@ -209,7 +212,7 @@ describe('processMetrics', () => {
         memory: { total_mb: 7168, used_mb: 2000 + i * 10, available_mb: 5168, cached_mb: 1024, swap_total_mb: 0, swap_used_mb: 0, usage_pct: 30 },
       }),
     );
-    const { report } = processMetrics(samples, makeSysInfo(), 300);
+    const report = processMetrics(samples, makeSysInfo(), 300);
     expect(report.timeline).toBeDefined();
     expect(report.timeline!.cpu_pct).toHaveLength(100);
     expect(report.timeline!.mem_mb).toHaveLength(100);
@@ -218,7 +221,7 @@ describe('processMetrics', () => {
   it('exports every collected metric in the timeline', () => {
     const s1 = makeSample({ timestamp: 1700000000 });
     const s2 = makeSample({ timestamp: 1700000003 });
-    const { report } = processMetrics([s1, s2], makeSysInfo(), 6);
+    const report = processMetrics([s1, s2], makeSysInfo(), 6);
     const timeline = report.timeline!;
     expect(timeline.cpu_idle).toEqual([55, 55]);
     expect(timeline.cpu_iowait).toEqual([3, 3]);
@@ -231,7 +234,7 @@ describe('processMetrics', () => {
   });
 
   it('omits timeline for single sample', () => {
-    const { report } = processMetrics([makeSample()], makeSysInfo(), 3);
+    const report = processMetrics([makeSample()], makeSysInfo(), 3);
     expect(report.timeline).toBeUndefined();
   });
 
@@ -242,14 +245,14 @@ describe('processMetrics', () => {
       { name: 'Checkout', number: 1, duration_seconds: 3, cpu_avg: 30, cpu_max: 45, mem_avg_mb: 2048, mem_max_mb: 3072, sample_count: 1, started_at: '2023-11-14T22:13:20Z', completed_at: '2023-11-14T22:13:23Z' },
       { name: 'Build', number: 2, duration_seconds: 3, cpu_avg: 60, cpu_max: 90, mem_avg_mb: 3072, mem_max_mb: 5120, sample_count: 1, started_at: '2023-11-14T22:13:23Z', completed_at: '2023-11-14T22:13:26Z' },
     ];
-    const { report } = processMetrics([s1, s2], makeSysInfo(), 6, steps);
+    const report = processMetrics([s1, s2], makeSysInfo(), 6, steps);
     expect(report.steps).toHaveLength(2);
     expect(report.steps![0].name).toBe('Checkout');
   });
 
   it('omits steps when empty array is passed', () => {
     const s = makeSample();
-    const { report } = processMetrics([s, s], makeSysInfo(), 6, []);
+    const report = processMetrics([s, s], makeSysInfo(), 6, []);
     expect(report.steps).toBeUndefined();
   });
 
@@ -257,14 +260,14 @@ describe('processMetrics', () => {
     const samples = Array(10).fill(null).map((_, i) =>
       makeSample({ timestamp: 1700000000 + i * 3 }),
     );
-    const { report } = processMetrics(samples, makeSysInfo(), 30);
+    const report = processMetrics(samples, makeSysInfo(), 30);
     expect(report.timeline).toBeDefined();
     expect(report.timeline!.cpu_pct).toHaveLength(10);
     expect(report.timeline!.mem_mb).toHaveLength(10);
   });
 
   it('returns safe defaults for empty samples array', () => {
-    const { report } = processMetrics([], makeSysInfo(), 0);
+    const report = processMetrics([], makeSysInfo(), 0);
     expect(report.sample_count).toBe(0);
     expect(report.cpu.avg).toBe(0);
     expect(report.memory.total_mb).toBe(0);
@@ -274,8 +277,56 @@ describe('processMetrics', () => {
 
   it('preserves metric_source in system info', () => {
     const s = makeSample();
-    const { report } = processMetrics([s, s], makeSysInfo({ metric_source: 'cgroup' }), 6);
+    const report = processMetrics([s, s], makeSysInfo({ metric_source: 'cgroup' }), 6);
     expect(report.system.metric_source).toBe('cgroup');
+  });
+
+  it('aggregates the collector\'s own footprint', () => {
+    const report = processMetrics(
+      [
+        makeSample({ timestamp: 1700000000, collector: { cpu_pct: 0.2, mem_mb: 3 } }),
+        makeSample({ timestamp: 1700000003, collector: { cpu_pct: 0.6, mem_mb: 5 } }),
+      ],
+      makeSysInfo(), 6,
+    );
+    expect(report.collector_overhead).toEqual({
+      cpu_avg: 0.4, cpu_max: 0.6, mem_avg_mb: 4, mem_max_mb: 5,
+    });
+  });
+
+  it('omits collector_overhead when no sample carries one', () => {
+    const bare = makeSample();
+    delete bare.collector;
+    const report = processMetrics([bare, bare], makeSysInfo(), 6);
+    expect(report.collector_overhead).toBeUndefined();
+  });
+
+  it('computes load stats from the 1-minute average', () => {
+    const report = processMetrics(
+      [
+        makeSample({ timestamp: 1700000000, load: { load1: 1, load5: 1, load15: 1 } }),
+        makeSample({ timestamp: 1700000003, load: { load1: 3, load5: 1, load15: 1 } }),
+      ],
+      makeSysInfo(), 6,
+    );
+    expect(report.load.avg_1m).toBe(2);
+    expect(report.load.max_1m).toBe(3);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// errors.ts
+// ─────────────────────────────────────────────────────────────
+
+describe('errMsg', () => {
+  it('unwraps an Error to its message', () => {
+    expect(errMsg(new Error('boom'))).toBe('boom');
+  });
+
+  it('stringifies non-Error throwables', () => {
+    expect(errMsg('plain string')).toBe('plain string');
+    expect(errMsg(42)).toBe('42');
+    expect(errMsg(undefined)).toBe('undefined');
   });
 });
 
@@ -577,7 +628,7 @@ describe('edge cases', () => {
       memory: { total_mb: 4096, used_mb: 1024, available_mb: 3072, cached_mb: 512, swap_total_mb: 0, swap_used_mb: 0, usage_pct: 25 },
       load: { load1: 0, load5: 0, load15: 0 },
     };
-    const { report } = processMetrics([sparse], makeSysInfo(), 3);
+    const report = processMetrics([sparse], makeSysInfo(), 3);
     expect(report.cpu.avg).toBe(15);
   });
 });
@@ -740,5 +791,164 @@ describe('buildJobSummary', () => {
     expect(md).toContain('storage.googleapis.com');
     expect(md).toContain('CPU Usage');
     expect(md).toContain('Memory Usage');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// config.ts
+// ─────────────────────────────────────────────────────────────
+
+describe('parseConfig', () => {
+  // @actions/core reads inputs from INPUT_<NAME> env vars.
+  const inputKeys = [
+    'INPUT_SAMPLE-INTERVAL', 'INPUT_MAX-FILE-SIZE', 'INPUT_UPLOAD-ARTIFACT',
+    'INPUT_GITHUB-TOKEN', 'INPUT_CHART-URL', 'INPUT_API-URL', 'INPUT_LEANCI-API-KEY',
+  ];
+
+  beforeEach(() => {
+    for (const k of inputKeys) delete process.env[k];
+    delete process.env.GITHUB_TOKEN;
+  });
+
+  it('falls back to documented defaults when nothing is set', () => {
+    const cfg = parseConfig();
+    expect(cfg.sampleInterval).toBe(5);
+    expect(cfg.maxSizeMb).toBe(100);
+    expect(cfg.uploadArtifact).toBe(true);
+    expect(cfg.chartUrl).toBe('https://chart.dev.leanci.dev');
+    expect(cfg.apiUrl).toBe('https://api.dev.leanci.dev');
+    expect(cfg.apiKey).toBe('');
+  });
+
+  it('clamps sample-interval into the documented 1-60 range', () => {
+    process.env['INPUT_SAMPLE-INTERVAL'] = '9999';
+    expect(parseConfig().sampleInterval).toBe(60);
+    process.env['INPUT_SAMPLE-INTERVAL'] = '0';
+    expect(parseConfig().sampleInterval).toBe(1);
+    process.env['INPUT_SAMPLE-INTERVAL'] = '-7';
+    expect(parseConfig().sampleInterval).toBe(1);
+  });
+
+  it('falls back to the default when an integer input is not a number', () => {
+    process.env['INPUT_SAMPLE-INTERVAL'] = 'abc';
+    process.env['INPUT_MAX-FILE-SIZE'] = 'not-a-number';
+    const cfg = parseConfig();
+    expect(cfg.sampleInterval).toBe(5);
+    expect(cfg.maxSizeMb).toBe(100);
+  });
+
+  it('never lets max-file-size go negative (0 = unlimited)', () => {
+    process.env['INPUT_MAX-FILE-SIZE'] = '-5';
+    expect(parseConfig().maxSizeMb).toBe(0);
+  });
+
+  it('treats upload-artifact case-insensitively and defaults non-"true" to false', () => {
+    process.env['INPUT_UPLOAD-ARTIFACT'] = 'TRUE';
+    expect(parseConfig().uploadArtifact).toBe(true);
+    process.env['INPUT_UPLOAD-ARTIFACT'] = 'false';
+    expect(parseConfig().uploadArtifact).toBe(false);
+    process.env['INPUT_UPLOAD-ARTIFACT'] = 'yes';
+    expect(parseConfig().uploadArtifact).toBe(false);
+  });
+
+  it('prefers the explicit github-token input over the env var', () => {
+    process.env.GITHUB_TOKEN = 'from-env';
+    expect(parseConfig().githubToken).toBe('from-env');
+    process.env['INPUT_GITHUB-TOKEN'] = 'from-input';
+    expect(parseConfig().githubToken).toBe('from-input');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// ingest.ts
+// ─────────────────────────────────────────────────────────────
+
+describe('ingestReport', () => {
+  const report = { version: '1.0.0' } as unknown as AggregatedReport;
+
+  beforeEach(() => {
+    process.env.GITHUB_REPOSITORY = 'leanci/web';
+    process.env.GITHUB_RUN_ID = '42';
+    process.env.GITHUB_JOB = 'build';
+    process.env.GITHUB_WORKFLOW = 'CI';
+  });
+
+  afterEach(() => {
+    for (const k of ['GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_JOB', 'GITHUB_WORKFLOW']) {
+      delete process.env[k];
+    }
+  });
+
+  function mockIngest(status: number, body: unknown = { stored: true, path: 'raw/x.json' }) {
+    fetchMock.mockImplementation(async () => ({
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => body,
+    }) as never);
+  }
+
+  it('posts run context and report to /v1/ingest with the api key', async () => {
+    mockIngest(200);
+    const result = await ingestReport(report, 'https://api.example.dev', 'k-123', 'success');
+
+    expect(result).toEqual({ stored: true, path: 'raw/x.json' });
+    const [url, init] = fetchMock.mock.calls[0] as unknown as
+      [string, { headers: Record<string, string>; body: string }];
+    expect(url).toBe('https://api.example.dev/v1/ingest');
+    expect(init.headers['x-api-key']).toBe('k-123');
+    expect(JSON.parse(init.body).run).toEqual({
+      owner: 'leanci', repo: 'web', runId: '42', job: 'build',
+      workflow: 'CI', conclusion: 'success',
+    });
+  });
+
+  it('strips trailing slashes from the api url', async () => {
+    mockIngest(200);
+    await ingestReport(report, 'https://api.example.dev///', 'k-123');
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expect(url).toBe('https://api.example.dev/v1/ingest');
+  });
+
+  it('caps an over-long workflow name at core\'s 200-char limit', async () => {
+    process.env.GITHUB_WORKFLOW = 'w'.repeat(500);
+    mockIngest(200);
+    await ingestReport(report, 'https://api.example.dev', 'k-123');
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, { body: string }];
+    expect(JSON.parse(init.body).run.workflow).toHaveLength(200);
+  });
+
+  it('omits workflow and conclusion when they are unavailable', async () => {
+    delete process.env.GITHUB_WORKFLOW;
+    mockIngest(200);
+    await ingestReport(report, 'https://api.example.dev', 'k-123');
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, { body: string }];
+    const run = JSON.parse(init.body).run;
+    expect(run).not.toHaveProperty('workflow');
+    expect(run).not.toHaveProperty('conclusion');
+  });
+
+  it('throws before any network call when run context is missing', async () => {
+    delete process.env.GITHUB_RUN_ID;
+    await expect(ingestReport(report, 'https://api.example.dev', 'k'))
+      .rejects.toThrow(/missing GITHUB_REPOSITORY/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('reports an invalid key distinctly from other failures', async () => {
+    mockIngest(401);
+    await expect(ingestReport(report, 'https://api.example.dev', 'bad'))
+      .rejects.toThrow(/invalid or missing leanci-api-key/);
+  });
+
+  it('reports rate limiting distinctly', async () => {
+    mockIngest(429);
+    await expect(ingestReport(report, 'https://api.example.dev', 'k'))
+      .rejects.toThrow(/rate-limited/);
+  });
+
+  it('throws on any other non-2xx status', async () => {
+    mockIngest(503);
+    await expect(ingestReport(report, 'https://api.example.dev', 'k'))
+      .rejects.toThrow(/ingest API returned 503/);
   });
 });

@@ -3,6 +3,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import { parseConfig } from './config';
+import { errMsg } from './errors';
+import type { SystemInfo } from './types';
 import {
   DATA_DIR, METRICS_FILE, PID_FILE, SYSINFO_FILE, START_TS_FILE,
   STATE,
@@ -40,6 +42,14 @@ async function run(): Promise<void> {
       stdio: 'ignore',
     });
 
+    // A ChildProcess emits 'error' when the binary can't be spawned at all
+    // (e.g. no `sh` on the PATH). Without a listener Node re-throws it as an
+    // uncaught exception *outside* this try/catch, which would fail the user's
+    // job — exactly what this action promises never to do.
+    child.on('error', (e) => {
+      core.warning(`RunnerLens: collector could not be spawned — ${e.message}`);
+    });
+
     child.unref();
 
     if (!child.pid) {
@@ -62,10 +72,12 @@ async function run(): Promise<void> {
     let infoMsg = `RunnerLens: collector started (PID ${child.pid})`;
     try {
       if (fs.existsSync(SYSINFO_FILE)) {
-        const si = JSON.parse(fs.readFileSync(SYSINFO_FILE, 'utf-8'));
+        const si = JSON.parse(
+          fs.readFileSync(SYSINFO_FILE, 'utf-8'),
+        ) as Partial<SystemInfo>;
         infoMsg += ` · ${si.cpu_count} CPUs · ${si.total_memory_mb} MB RAM`;
       }
-    } catch { /* best-effort */ }
+    } catch { /* best-effort: the banner is cosmetic */ }
     infoMsg += ` · sampling every ${cfg.sampleInterval}s`;
     core.info(infoMsg);
 
@@ -74,9 +86,10 @@ async function run(): Promise<void> {
 
   } catch (err) {
     // Never fail the user's workflow — monitoring is best-effort.
-    const msg = err instanceof Error ? err.message : String(err);
-    core.warning(`RunnerLens: failed to start monitoring — ${msg}`);
+    core.warning(`RunnerLens: failed to start monitoring — ${errMsg(err)}`);
   }
 }
 
-run();
+// `run` never rejects — every path is caught above — so nothing is left
+// floating here; `void` states that intent for the linter.
+void run();

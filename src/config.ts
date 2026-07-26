@@ -12,6 +12,12 @@ function intInput(name: string, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function boolInput(name: string, fallback: boolean): boolean {
+  const raw = core.getInput(name).trim().toLowerCase();
+  if (!raw) return fallback;
+  return raw === 'true';
+}
+
 export function parseConfig(): MonitorConfig {
   // Auto-detect: explicit input → GITHUB_TOKEN env.
   // ACTIONS_RUNTIME_TOKEN is intentionally excluded — it typically lacks
@@ -23,6 +29,7 @@ export function parseConfig(): MonitorConfig {
   return {
     sampleInterval: clamp(intInput('sample-interval', 5), 1, 60),
     maxSizeMb: Math.max(0, intInput('max-file-size', 100)),
+    uploadArtifact: boolInput('upload-artifact', true),
     githubToken,
     chartUrl: core.getInput('chart-url') || 'https://chart.dev.leanci.dev',
     apiUrl: core.getInput('api-url') || 'https://api.dev.leanci.dev',

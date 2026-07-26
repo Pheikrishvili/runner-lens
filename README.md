@@ -20,13 +20,17 @@ jobs:
 
 That's it. When the job finishes, you'll see a resource report in the **Job Summary** tab.
 
+> **Requires a Linux runner.** The collector reads kernel counters from cgroup v2
+> and `/proc`, which exist only on Linux. On `macos-*` and `windows-*` runners the
+> action logs a warning and does nothing — it never fails the job.
+
 ## What You Get
 
 - **Stat cards** — runner specs, job duration, CPU and memory averages/peaks
 - **CPU chart** — total usage with user/nice/system breakdown over time
 - **Memory chart** — usage with cache and swap breakdown over time
 - **Per-Step Breakdown** — step bands overlaid on the charts plus a Gantt execution timeline (requires `actions: read` permission)
-- **Report artifact** — the full aggregated report as `report.json`, including complete metric timelines (CPU idle/iowait/steal, memory available/usage %, 1/5/15-minute load averages)
+- **Report artifact** — the full aggregated report as `report.json`, including complete metric timelines (CPU idle/iowait/steal, memory available/usage %, 1/5/15-minute load averages) and the collector's own measured overhead
 
 Charts are rendered as PNG images by the **LeanCI chart service** — Chart.js v4 configs sent as pure JSON, images stored in LeanCI GCS buckets. Nothing is sent to third-party chart services — rendering runs on LeanCI's own infrastructure. Retention is tiered: without a `leanci-api-key` images live **14 days** (free tier); with a valid LeanCI API key, **90 days** (paid tier — matching GitHub's own log retention). The same key also ingests the report into the LeanCI dashboard.
 
@@ -111,16 +115,16 @@ post step ends, but a same-job step still can't read it via `steps.*.outputs`.
 
 RunnerLens uses a two-phase design:
 
-1. **Main step** — spawns a lightweight bash collector as a detached background process
-2. **Post step** (`post-if: always()`) — stops the collector, aggregates data, writes the Job Summary, and uploads the report artifact
+1. **Main step** — spawns a lightweight POSIX `sh` collector as a detached background process
+2. **Post step** (`post-if: always()`) — stops the collector, aggregates the samples, writes the Job Summary, uploads the report artifact, and (with a `leanci-api-key`) ingests the report into the LeanCI dashboard
 
-The bash collector reads from cgroup v2 when available (containers) and falls back to `/proc` (VMs), with <0.5% CPU overhead. It outputs one JSON line per sample to a temp file, and also records its own CPU/memory footprint with every sample.
+The collector reads from cgroup v2 when available (containers) and falls back to `/proc` (VMs). It outputs one JSON line per sample to a temp file, and records its own CPU/memory footprint with every sample — that footprint is aggregated into `collector_overhead` in the report, so the overhead claim is measured rather than asserted.
 
-Monitoring is best-effort by design: any failure is logged as a warning and never fails your workflow.
+Monitoring is best-effort by design: any failure is logged as a warning and never fails your workflow. All temp files are removed in the post step.
 
 ### File Rotation
 
-For long-running jobs (multi-hour builds on self-hosted runners), the collector automatically rotates the metrics file when it exceeds `max-file-size` MB. The TypeScript post-processor reads both the rotated and current files, sorts samples chronologically, and produces a single unified report.
+For long-running jobs (multi-hour builds on self-hosted runners), the collector automatically rotates the metrics file when it exceeds `max-file-size` MB. At most two files are kept — the current one plus a single `.1` backup — so disk usage stays bounded. The TypeScript post-processor reads both, sorts samples chronologically, and produces a single unified report.
 
 ## How It Works
 
@@ -135,40 +139,67 @@ For long-running jobs (multi-hour builds on self-hosted runners), the collector 
 │  (always)   │     │  (aggregate) │
 └─────────────┘     └──────┬───────┘
                            │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-        Job Summary    Outputs    report.json artifact
+         ┌─────────────┬───┴────────┬──────────────────┐
+         ▼             ▼            ▼                  ▼
+   Job Summary      Outputs   report.json    LeanCI ingest API
+   (chart svc)                  artifact     (with API key only)
 ```
 
 ## The Report Artifact
 
-With `upload-artifact: true` (the default), each job uploads a `runner-lens-<job>` artifact containing `report.json`: system info, aggregate CPU/memory/load statistics, per-step metrics, and full per-sample timelines (`cpu_pct`, `cpu_user`, `cpu_nice`, `cpu_system`, `cpu_idle`, `cpu_iowait`, `cpu_steal`, `mem_mb`, `mem_available_mb`, `mem_cached_mb`, `mem_swap_mb`, `mem_usage_pct`, `load_1m`, `load_5m`, `load_15m`). This is the data contract for downstream tooling such as the upcoming RunnerLens SaaS dashboard (historical trends, right-sizing recommendations, and cost analytics).
+With `upload-artifact: true` (the default), each job uploads a `runner-lens-<job>` artifact containing `report.json`. This is the data contract for downstream tooling such as the LeanCI SaaS dashboard (historical trends, right-sizing recommendations, and cost analytics).
+
+| Field | Notes |
+|---|---|
+| `version` | Report schema version — currently `1.0.0` |
+| `system` | CPU model & count, total memory, OS release, kernel, runner name/OS/arch, and `metric_source` (`cgroup` or `proc`) |
+| `duration_seconds`, `sample_count`, `started_at`, `ended_at` | Run envelope |
+| `cpu`, `memory`, `load` | Aggregates — `avg`/`max`/`min`/`latest`, plus `total_mb` and `swap_max_mb` for memory |
+| `collector_overhead` | RunnerLens's own measured `cpu_avg`/`cpu_max`/`mem_avg_mb`/`mem_max_mb`. Absent if the collector emitted no self-monitoring data |
+| `steps` | Per-step name, number, duration, CPU/memory avg & max, sample count, timestamps. Absent without `actions: read` |
+| `timeline` | Full per-sample series: `cpu_pct`, `cpu_user`, `cpu_nice`, `cpu_system`, `cpu_idle`, `cpu_iowait`, `cpu_steal`, `mem_mb`, `mem_available_mb`, `mem_cached_mb`, `mem_swap_mb`, `mem_usage_pct`, `load_1m`, `load_5m`, `load_15m`. Absent for a single sample |
+
+Optional fields are omitted rather than emitted as `null`, so consumers must treat `steps`, `timeline`, and `collector_overhead` as possibly-absent.
 
 ## Development
 
 ```bash
 npm ci
-npm run typecheck    # TypeScript strict mode
-npm test             # Jest with coverage
-npm run build        # esbuild → dist/ (checked in — rebuild after src changes)
+npm run typecheck                 # TypeScript strict mode
+npm run lint                      # ESLint (type-aware rules)
+npm test                          # Jest with coverage thresholds
+npm run build                     # esbuild → dist/ (checked in — rebuild after src changes)
+shellcheck -s sh scripts/collect.sh   # POSIX sh linting
 ```
+
+`dist/` is committed because the Actions runner executes it directly. CI rebuilds
+it and fails if the result differs from what's checked in, so **always run
+`npm run build` and commit `dist/` alongside any `src/` change**.
+
+Static analysis runs on every push: ESLint + `tsc` locally and in CI, and
+SonarCloud via [`sonar-project.properties`](sonar-project.properties) (coverage
+is read from `coverage/lcov.info`, which `npm test` produces).
 
 ### Project Structure
 
 ```
 ├── action.yml                 # GitHub Action definition
-├── scripts/collect.sh         # Bash collector (cgroup v2 + /proc)
+├── eslint.config.mjs          # ESLint flat config (type-aware rules)
+├── sonar-project.properties   # SonarCloud analysis config
+├── scripts/collect.sh         # POSIX sh collector (cgroup v2 + /proc)
 ├── src/
 │   ├── main.ts                # Entry: spawn collector
 │   ├── post.ts                # Post: stop, aggregate, report
 │   ├── config.ts              # Input parsing & validation
 │   ├── constants.ts           # Shared paths & state keys
 │   ├── types.ts               # All TypeScript interfaces
+│   ├── errors.ts              # Narrows unknown throwables for logging
 │   ├── stats.ts               # Stack-safe stats & formatting helpers
 │   ├── steps.ts               # GitHub API step fetch & correlation
 │   ├── reporter.ts            # Sample aggregation
+│   ├── ingest.ts              # POSTs the report to the LeanCI ingest API
 │   └── job-summary.ts         # Job Summary rendering via the LeanCI chart service
-├── dist/                      # Bundled JS (checked in)
+├── dist/                      # Bundled JS (checked in — verified in CI)
 └── __tests__/                 # Jest test suite
 ```
 

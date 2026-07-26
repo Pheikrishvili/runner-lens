@@ -140,7 +140,7 @@ export async function fetchSteps(token: string): Promise<FetchStepsResult> {
 
     let data: { jobs?: GitHubJob[]; total_count?: number };
     try {
-      data = JSON.parse(res.body);
+      data = JSON.parse(res.body) as { jobs?: GitHubJob[]; total_count?: number };
     } catch {
       core.info('RunnerLens: GitHub API returned non-JSON response');
       return { steps: [] };

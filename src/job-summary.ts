@@ -343,7 +343,7 @@ function buildSteppedChartConfig(
   extraLines?: ExtraLineDataset[],
 ): Record<string, unknown> {
   const yValues = dataPoints.map((p) => p.y);
-  const dataMax = yValues.length > 0 ? Math.max(...yValues) : 100;
+  const dataMax = yValues.length > 0 ? safeMax(yValues) : 100;
   const chartYMax = yMax ?? dataMax * 1.15;
   const xRange = xMax - xMin;
 

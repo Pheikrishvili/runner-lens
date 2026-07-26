@@ -9,6 +9,7 @@ import { processMetrics } from './reporter';
 import { safePct } from './stats';
 import { fetchSteps, correlateSteps, type FetchStepsResult } from './steps';
 import { ingestReport } from './ingest';
+import { errMsg } from './errors';
 
 import { buildJobSummary } from './job-summary';
 import {
@@ -35,8 +36,25 @@ function stopCollector(): void {
       core.info(`RunnerLens: collector stopped (PID ${pid})`);
     }
   } catch (e) {
-    core.debug(`RunnerLens: stop error — ${e}`);
+    core.debug(`RunnerLens: stop error — ${errMsg(e)}`);
   }
+}
+
+/**
+ * Structural check for one parsed JSONL line. The collector can be killed
+ * mid-write, so the last line is routinely truncated — anything that doesn't
+ * carry the fields the reporter reads is dropped rather than trusted.
+ */
+function isMetricSample(value: unknown): value is MetricSample {
+  if (typeof value !== 'object' || value === null) return false;
+  const s = value as Record<string, unknown>;
+  const cpu = s.cpu as Record<string, unknown> | undefined;
+  const memory = s.memory as Record<string, unknown> | undefined;
+  return (
+    typeof s.timestamp === 'number' &&
+    typeof cpu?.usage === 'number' &&
+    typeof memory?.used_mb === 'number'
+  );
 }
 
 /**
@@ -62,17 +80,10 @@ function loadSamples(): MetricSample[] {
       start = end + 1;
       if (!line) continue;
       try {
-        const parsed = JSON.parse(line);
-        // Basic shape validation: must have timestamp and cpu.usage
-        if (
-          typeof parsed.timestamp === 'number' &&
-          parsed.cpu && typeof parsed.cpu.usage === 'number' &&
-          parsed.memory && typeof parsed.memory.used_mb === 'number'
-        ) {
-          samples.push(parsed as MetricSample);
-        }
+        const parsed: unknown = JSON.parse(line);
+        if (isMetricSample(parsed)) samples.push(parsed);
       } catch {
-        /* skip malformed lines */
+        /* skip malformed lines — a truncated tail is expected on shutdown */
       }
     }
   }
@@ -85,7 +96,7 @@ function loadSamples(): MetricSample[] {
 function loadSystemInfo(): SystemInfo {
   try {
     if (fs.existsSync(SYSINFO_FILE))
-      return JSON.parse(fs.readFileSync(SYSINFO_FILE, 'utf-8'));
+      return JSON.parse(fs.readFileSync(SYSINFO_FILE, 'utf-8')) as SystemInfo;
   } catch { /* fallback */ }
   const cpus = os.cpus();
   return {
@@ -110,7 +121,7 @@ async function run(): Promise<void> {
       return;
     }
 
-    const config  = parseConfig();
+    const config = parseConfig();
 
     // ── Stop collector & flush ────────────────────────────
     stopCollector();
@@ -139,7 +150,7 @@ async function run(): Promise<void> {
           core.info(`RunnerLens: correlated ${steps.length} steps`);
         }
       } catch (e) {
-        core.debug(`RunnerLens: step fetch failed — ${e}`);
+        core.debug(`RunnerLens: step fetch failed — ${errMsg(e)}`);
       }
     }
 
@@ -160,7 +171,7 @@ async function run(): Promise<void> {
     core.info(`RunnerLens: ${samples.length} samples over ${dur}s`);
 
     // ── Process ───────────────────────────────────────────
-    const { report } = processMetrics(samples, sysInfo, dur, steps);
+    const report = processMetrics(samples, sysInfo, dur, steps);
 
     // ── Outputs ───────────────────────────────────────────
     core.setOutput('cpu-avg', report.cpu.avg.toFixed(1));
@@ -177,7 +188,7 @@ async function run(): Promise<void> {
     core.setOutput('report-json', JSON.stringify(outputReport));
 
     // ── Upload report artifact (opt-in) ────────────────
-    if (core.getInput('upload-artifact').toLowerCase() === 'true') {
+    if (config.uploadArtifact) {
       try {
         const jobName = process.env.GITHUB_JOB || 'job';
         const artifactName = `runner-lens-${jobName}`;
@@ -187,7 +198,7 @@ async function run(): Promise<void> {
         await artClient.uploadArtifact(artifactName, [reportFile], DATA_DIR);
         core.info(`RunnerLens: uploaded artifact "${artifactName}"`);
       } catch (e) {
-        core.debug(`RunnerLens: artifact upload failed — ${e}`);
+        core.debug(`RunnerLens: artifact upload failed — ${errMsg(e)}`);
       }
     }
 
@@ -197,7 +208,7 @@ async function run(): Promise<void> {
         const result = await ingestReport(report, config.apiUrl, config.apiKey, fetchResult.jobConclusion);
         core.info(`RunnerLens: report ingested — ${result.path ?? 'stored'}`);
       } catch (e) {
-        core.debug(`RunnerLens: report ingest failed — ${e}`);
+        core.debug(`RunnerLens: report ingest failed — ${errMsg(e)}`);
       }
     }
 
@@ -211,16 +222,17 @@ async function run(): Promise<void> {
       });
       await core.summary.addRaw(summaryHtml).write();
     } catch (e) {
-      core.debug(`RunnerLens: job summary failed — ${e}`);
+      core.debug(`RunnerLens: job summary failed — ${errMsg(e)}`);
     }
 
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    core.warning(`RunnerLens: report failed — ${msg}`);
+    core.warning(`RunnerLens: report failed — ${errMsg(err)}`);
   } finally {
     // ── Cleanup temp files (including rotated .1) ─────────
     try { fs.rmSync(DATA_DIR, { recursive: true, force: true }); } catch { /* ok */ }
   }
 }
 
-run();
+// `run` never rejects — every path is caught above — so nothing is left
+// floating here; `void` states that intent for the linter.
+void run();

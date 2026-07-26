@@ -28,9 +28,18 @@ export interface LoadAverage {
   load15: number;
 }
 
+/** The collector's own resource footprint, emitted with every sample. */
 export interface CollectorSample {
   cpu_pct: number;
   mem_mb: number;
+}
+
+/** Aggregated collector footprint — proves the monitoring overhead is negligible. */
+export interface CollectorOverhead {
+  cpu_avg: number;
+  cpu_max: number;
+  mem_avg_mb: number;
+  mem_max_mb: number;
 }
 
 export interface MetricSample {
@@ -56,6 +65,7 @@ export interface SystemInfo {
 export interface MonitorConfig {
   sampleInterval: number;
   maxSizeMb: number;
+  uploadArtifact: boolean;
   githubToken: string;
   chartUrl: string;
   apiUrl: string;
@@ -95,6 +105,8 @@ export interface AggregatedReport {
   memory: MetricStats & { total_mb: number; swap_max_mb: number };
 
   load: { avg_1m: number; max_1m: number };
+  /** Omitted when the collector emitted no self-monitoring data. */
+  collector_overhead?: CollectorOverhead;
   steps?: StepMetrics[];
   timeline?: {
     cpu_pct: number[];    // total CPU usage %, 0-100
